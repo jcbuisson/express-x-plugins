@@ -1,0 +1,42 @@
+{
+  "name": "@jcbuisson/express-x-electric",
+  "version": "0.1.0",
+  "description": "ElectricSQL sync plugin for express-x",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./server": "./src/electric-server-plugin.mjs",
+    "./client": "./src/electric-client-plugin.mjs"
+  },
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/jcbuisson/express-x-electric.git"
+  },
+  "author": "Jean-Christophe Buisson <buisson@enseeiht.fr> (jcbuisson.dev)",
+  "license": "MIT",
+  "keywords": [
+    "express-x",
+    "electric-sql",
+    "sync",
+    "local-first"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@electric-sql/client": "^1.5.24",
+    "rxjs": "^7.8.2"
+  },
+  "peerDependencies": {
+    "@jcbuisson/express-x": "^3.1.39"
+  }
+}

@@ -1,4 +1,6 @@
-/**
+import { randomUUID } from 'node:crypto'
+
+  /**
  * Register Express-X reload plugin
  *
  * @param {object} app Express-X/Express application

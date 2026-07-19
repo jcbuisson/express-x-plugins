@@ -11,6 +11,9 @@ metadata table and no custom `sync.go`: Electric is the sync engine.
 npm install @jcbuisson/express-x-electric pg
 ```
 
+This server-only installation does not install the browser Electric client or
+RxJS.
+
 ## Server
 
 ```js
@@ -49,6 +52,12 @@ contains `pg_current_xact_id()` and can be passed to an Electric-aware client to
 wait for the matching transaction in its Shape stream.
 
 ## Client Shape
+
+Install the optional client dependencies in the browser application:
+
+```sh
+npm install @jcbuisson/express-x-electric @electric-sql/client rxjs
+```
 
 Configure the client plugin and use the same `getObservable(where)` style as
 `express-x-client`'s offline model:

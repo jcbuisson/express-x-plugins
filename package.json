@@ -1,13 +1,14 @@
 {
-  "name": "@jcbuisson/express-x-electric",
-  "version": "0.1.0",
-  "description": "ElectricSQL sync plugin for express-x",
+  "name": "@jcbuisson/express-x-plugins",
+  "version": "4.0.0",
+  "description": "Plugins for express-x",
   "type": "module",
-  "main": "src/index.mjs",
+  "main": "./src/electric-server-plugin.mjs",
   "exports": {
-    ".": "./src/index.mjs",
-    "./server": "./src/electric-server-plugin.mjs",
-    "./client": "./src/electric-client-plugin.mjs"
+    "./electric-server": "./src/electric-server-plugin.mjs",
+    "./electric-client": "./src/electric-client-plugin.mjs",
+    "./reload-server": "./src/reload-server-plugin.mjs",
+    "./reload-client": "./src/reload-client-plugin.mjs"
   },
   "private": false,
   "publishConfig": {
@@ -19,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/jcbuisson/express-x-electric.git"
+    "url": "git+ssh://git@github.com/jcbuisson/express-x-plugins.git"
   },
   "author": "Jean-Christophe Buisson <buisson@enseeiht.fr> (jcbuisson.dev)",
   "license": "MIT",
@@ -32,11 +33,20 @@
   "scripts": {
     "test": "node --test"
   },
-  "dependencies": {
+  "peerDependencies": {
     "@electric-sql/client": "^1.5.24",
     "rxjs": "^7.8.2"
   },
-  "peerDependencies": {
-    "@jcbuisson/express-x": "^3.1.39"
+  "peerDependenciesMeta": {
+    "@electric-sql/client": {
+      "optional": true
+    },
+    "rxjs": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@electric-sql/client": "^1.5.24",
+    "rxjs": "^7.8.2"
   }
 }

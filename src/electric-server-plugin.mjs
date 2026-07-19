@@ -1,120 +1,3 @@
-const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
-const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
-
-function quoteIdentifier(value, label) {
-   if (typeof value !== 'string' || !IDENTIFIER.test(value)) {
-      throw new TypeError(`${label} must be a simple SQL identifier`)
-   }
-   return `"${value}"`
-}
-
-function normalizeModels(models) {
-   if (!Array.isArray(models) || models.length === 0) {
-      throw new TypeError('models must be a non-empty array')
-   }
-   return models.map(model => {
-      const config = typeof model === 'string' ? { name: model } : model
-      if (!config || typeof config !== 'object' || Array.isArray(config)) {
-         throw new TypeError('each model must be a name or configuration object')
-      }
-      const name = config.name
-      const table = config.table ?? name
-      const primaryKey = config.primaryKey ?? 'uid'
-      quoteIdentifier(name, 'model name')
-      return {
-         name,
-         table,
-         primaryKey,
-         quotedTable: quoteIdentifier(table, `table for '${name}'`),
-         quotedPrimaryKey: quoteIdentifier(primaryKey, `primary key for '${name}'`),
-      }
-   })
-}
-
-function assertPlainObject(value, label) {
-   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.prototype.toString.call(value) !== '[object Object]') {
-      throw new TypeError(`${label} must be a plain object`)
-   }
-}
-
-function buildWhere(where, startIndex = 1) {
-   assertPlainObject(where, 'where')
-   const clauses = []
-   const values = []
-   for (const [column, constraint] of Object.entries(where)) {
-      const quotedColumn = quoteIdentifier(column, 'where column')
-      if (constraint === undefined) continue
-      if (constraint === null) {
-         clauses.push(`${quotedColumn} IS NULL`)
-         continue
-      }
-      if (constraint && typeof constraint === 'object' && !Array.isArray(constraint)) {
-         const entries = Object.entries(constraint)
-         if (entries.length === 0 || entries.some(([operator]) => !RANGE_OPERATORS[operator])) {
-            throw new TypeError(`unsupported where constraint for '${column}'`)
-         }
-         for (const [operator, value] of entries) {
-            values.push(value)
-            clauses.push(`${quotedColumn} ${RANGE_OPERATORS[operator]} $${startIndex + values.length - 1}`)
-         }
-         continue
-      }
-      values.push(constraint)
-      clauses.push(`${quotedColumn} = $${startIndex + values.length - 1}`)
-   }
-   return { sql: clauses.length ? clauses.join(' AND ') : 'TRUE', values }
-}
-
-function buildSet(data, startIndex = 1) {
-   assertPlainObject(data, 'mutation data')
-   const entries = Object.entries(data).filter(([key, value]) => key !== 'uid' && value !== undefined)
-   if (entries.length === 0) throw new TypeError('mutation data must contain at least one field')
-   return {
-      sql: entries.map(([column], index) => `${quoteIdentifier(column, 'data column')} = $${startIndex + index}`).join(', '),
-      values: entries.map(([, value]) => value),
-   }
-}
-
-async function withTransaction(db, operation) {
-   if (typeof db?.connect !== 'function') return operation(db)
-   const client = await db.connect()
-   try {
-      await client.query('BEGIN')
-      const result = await operation(client)
-      await client.query('COMMIT')
-      return result
-   } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-   } finally {
-      client.release()
-   }
-}
-
-async function transactionId(client) {
-   const result = await client.query('SELECT pg_current_xact_id()::text AS txid')
-   return result.rows[0]?.txid
-}
-
-function mutationMeta(uid, field, timestamp, txid) {
-   return { uid, created_at: null, updated_at: null, deleted_at: null, [field]: timestamp, txid }
-}
-
-function normalizeTimestamp(value, field) {
-   const timestamp = new Date(value)
-   if (Number.isNaN(timestamp.getTime())) throw new TypeError(`${field} must be a valid timestamp`)
-   return timestamp.toISOString()
-}
-
-function copyResponseHeaders(source, target) {
-   source.headers.forEach((value, key) => {
-      if (!['content-encoding', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
-         target.setHeader(key, value)
-      }
-   })
-}
-
 /**
  * Register Express-X mutation services and an Electric Shape proxy.
  *
@@ -248,5 +131,120 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
    return { shapePath, models: configuredModels.map(({ name, table, primaryKey }) => ({ name, table, primaryKey })) }
 }
 
-export const expressXElectricPlugin = electricOfflinePlugin
-export default electricOfflinePlugin
+
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
+
+function quoteIdentifier(value, label) {
+   if (typeof value !== 'string' || !IDENTIFIER.test(value)) {
+      throw new TypeError(`${label} must be a simple SQL identifier`)
+   }
+   return `"${value}"`
+}
+
+function normalizeModels(models) {
+   if (!Array.isArray(models) || models.length === 0) {
+      throw new TypeError('models must be a non-empty array')
+   }
+   return models.map(model => {
+      const config = typeof model === 'string' ? { name: model } : model
+      if (!config || typeof config !== 'object' || Array.isArray(config)) {
+         throw new TypeError('each model must be a name or configuration object')
+      }
+      const name = config.name
+      const table = config.table ?? name
+      const primaryKey = config.primaryKey ?? 'uid'
+      quoteIdentifier(name, 'model name')
+      return {
+         name,
+         table,
+         primaryKey,
+         quotedTable: quoteIdentifier(table, `table for '${name}'`),
+         quotedPrimaryKey: quoteIdentifier(primaryKey, `primary key for '${name}'`),
+      }
+   })
+}
+
+function assertPlainObject(value, label) {
+   if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.prototype.toString.call(value) !== '[object Object]') {
+      throw new TypeError(`${label} must be a plain object`)
+   }
+}
+
+function buildWhere(where, startIndex = 1) {
+   assertPlainObject(where, 'where')
+   const clauses = []
+   const values = []
+   for (const [column, constraint] of Object.entries(where)) {
+      const quotedColumn = quoteIdentifier(column, 'where column')
+      if (constraint === undefined) continue
+      if (constraint === null) {
+         clauses.push(`${quotedColumn} IS NULL`)
+         continue
+      }
+      if (constraint && typeof constraint === 'object' && !Array.isArray(constraint)) {
+         const entries = Object.entries(constraint)
+         if (entries.length === 0 || entries.some(([operator]) => !RANGE_OPERATORS[operator])) {
+            throw new TypeError(`unsupported where constraint for '${column}'`)
+         }
+         for (const [operator, value] of entries) {
+            values.push(value)
+            clauses.push(`${quotedColumn} ${RANGE_OPERATORS[operator]} $${startIndex + values.length - 1}`)
+         }
+         continue
+      }
+      values.push(constraint)
+      clauses.push(`${quotedColumn} = $${startIndex + values.length - 1}`)
+   }
+   return { sql: clauses.length ? clauses.join(' AND ') : 'TRUE', values }
+}
+
+function buildSet(data, startIndex = 1) {
+   assertPlainObject(data, 'mutation data')
+   const entries = Object.entries(data).filter(([key, value]) => key !== 'uid' && value !== undefined)
+   if (entries.length === 0) throw new TypeError('mutation data must contain at least one field')
+   return {
+      sql: entries.map(([column], index) => `${quoteIdentifier(column, 'data column')} = $${startIndex + index}`).join(', '),
+      values: entries.map(([, value]) => value),
+   }
+}
+
+async function withTransaction(db, operation) {
+   if (typeof db?.connect !== 'function') return operation(db)
+   const client = await db.connect()
+   try {
+      await client.query('BEGIN')
+      const result = await operation(client)
+      await client.query('COMMIT')
+      return result
+   } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+   } finally {
+      client.release()
+   }
+}
+
+async function transactionId(client) {
+   const result = await client.query('SELECT pg_current_xact_id()::text AS txid')
+   return result.rows[0]?.txid
+}
+
+function mutationMeta(uid, field, timestamp, txid) {
+   return { uid, created_at: null, updated_at: null, deleted_at: null, [field]: timestamp, txid }
+}
+
+function normalizeTimestamp(value, field) {
+   const timestamp = new Date(value)
+   if (Number.isNaN(timestamp.getTime())) throw new TypeError(`${field} must be a valid timestamp`)
+   return timestamp.toISOString()
+}
+
+function copyResponseHeaders(source, target) {
+   source.headers.forEach((value, key) => {
+      if (!['content-encoding', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
+         target.setHeader(key, value)
+      }
+   })
+}

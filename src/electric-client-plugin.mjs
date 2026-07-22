@@ -1,5 +1,6 @@
 import { Shape, ShapeStream } from '@electric-sql/client'
 import { Observable } from 'rxjs'
+import { getCurrentScope, onScopeDispose, ref } from 'vue'
 
 
 /**
@@ -46,6 +47,13 @@ export function electricClientPlugin(app, options = {}) {
          })
       }
 
+      function getVueRef(where = {}) {
+         const value = ref([])
+         const subscription = getObservable(where).subscribe(rows => { value.value = rows })
+         if (getCurrentScope()) onScopeDispose(() => subscription.unsubscribe())
+         return value
+      }
+
       async function create(data) {
          assertPlainObject(data, 'mutation data')
          const uid = globalThis.crypto?.randomUUID?.()
@@ -65,7 +73,7 @@ export function electricClientPlugin(app, options = {}) {
          return value
       }
 
-      return { getObservable, create, update, remove }
+      return { getObservable, getVueRef, create, update, remove }
    }
 
    return Object.assign(app, { createElectricModel })
@@ -105,7 +113,7 @@ function serializeValue(value, path) {
 }
 
 /** Convert the Express-X object filter into Electric's parameterized SQL filter. */
-function whereToElectricParams(where = {}) {
+export function whereToElectricParams(where = {}) {
    assertPlainObject(where, 'where')
    const clauses = []
    const params = []
@@ -139,3 +147,5 @@ function modelPath(shapePath, modelName) {
    const base = shapePath.replace(/\/$/, '')
    return `${base}/${encodeURIComponent(modelName)}`
 }
+
+export default electricClientPlugin

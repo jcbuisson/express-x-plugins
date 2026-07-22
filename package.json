@@ -1,6 +1,6 @@
 {
   "name": "@jcbuisson/express-x-plugins",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "description": "Plugins for express-x",
   "type": "module",
   "main": "./src/electric-server-plugin.mjs",
@@ -35,7 +35,8 @@
   },
   "peerDependencies": {
     "@electric-sql/client": "^1.5.24",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "vue": "^3.5.0"
   },
   "peerDependenciesMeta": {
     "@electric-sql/client": {
@@ -43,10 +44,14 @@
     },
     "rxjs": {
       "optional": true
+    },
+    "vue": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@electric-sql/client": "^1.5.24",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "vue": "^3.5.0"
   }
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { effectScope, isRef } from 'vue'
 
 import { electricClientPlugin, whereToElectricParams } from '../src/electric-client-plugin.mjs'
 
@@ -12,7 +13,7 @@ class FakeStream {
 }
 
 class FakeShape {
-   constructor(stream) { this.stream = stream }
+   constructor(stream) { this.stream = stream; stream.shape = this }
    subscribe(callback) {
       callback({ rows: [{ uid: 'one', completed: false }] })
       return () => { this.unsubscribed = true }
@@ -41,6 +42,23 @@ test('getObservable emits Shape rows and cleans up its subscription', () => {
       where: '"completed" = $1', params: ['false'],
    })
    subscription.unsubscribe()
+})
+
+test('getVueRef returns Shape rows in a Vue ref and cleans up with its scope', () => {
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
+   const todo = app.createElectricModel('todos')
+   const scope = effectScope()
+   let rows
+
+   scope.run(() => { rows = todo.getVueRef({ completed: false }) })
+
+   assert.equal(isRef(rows), true)
+   assert.deepEqual(rows.value, [{ uid: 'one', completed: false }])
+   const shape = FakeStream.instances.at(-1).shape
+   assert.equal(shape.unsubscribed, undefined)
+   scope.stop()
+   assert.equal(shape.unsubscribed, true)
 })
 
 test('model mutations retain the simple Express-X API', async () => {

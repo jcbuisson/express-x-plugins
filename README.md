@@ -2,8 +2,7 @@
 
 The smallest useful ElectricSQL integration for Express-X. Express-X handles
 authorized PostgreSQL mutations; Electric's Shape API streams those changes to
-clients. It is analogous to `express-x-drizzle`, but deliberately has no
-metadata table and no custom `sync.go`: Electric is the sync engine.
+clients: Electric is the sync engine.
 
 ## Install
 
@@ -11,8 +10,7 @@ metadata table and no custom `sync.go`: Electric is the sync engine.
 npm install @jcbuisson/express-x-electric pg
 ```
 
-This server-only installation does not install the browser Electric client or
-RxJS.
+This server-only installation does not install the browser Electric client or RxJS.
 
 ## Server
 
@@ -102,4 +100,23 @@ as query parameters; range filters support `gt`, `gte`, `lt`, and `lte`.
 Requires Node 18+ for the built-in Fetch API. The PostgreSQL client only needs a
 `query(sql, values)` method; a `pg.Pool` is recommended so each mutation and its
 transaction ID are captured in the same transaction.
-# express-x-electric
+
+## Run Electric from Docker
+
+A local install of the Electric sync engine requires Elixir and Erlang; it is simpler to use a pre-built Docker image.
+
+```
+services:
+  electric:
+    image: electricsql/electric:latest
+    environment:
+      DATABASE_URL: postgresql://user:password@host.docker.internal:5432/mydb
+      ELECTRIC_INSECURE: "true"
+    ports:
+      - "3001:3000"
+```
+
+```
+docker compose pull electric
+docker compose up electric
+```

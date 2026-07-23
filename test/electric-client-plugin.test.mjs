@@ -20,6 +20,22 @@ class FakeShape {
    }
 }
 
+class DeferredShape {
+   constructor(stream) { this.stream = stream; stream.shape = this }
+   subscribe(callback) {
+      this.callback = callback
+      return () => { this.unsubscribed = true }
+   }
+}
+
+class EmptyShape {
+   constructor(stream) { this.stream = stream; stream.shape = this }
+   subscribe(callback) {
+      callback({ rows: [] })
+      return () => { this.unsubscribed = true }
+   }
+}
+
 test('translates where objects into parameterized Electric filters', () => {
    assert.deepEqual(whereToElectricParams({ completed: false, priority: { gte: 2, lt: 5 }, owner: null }), {
       where: '"completed" = $1 AND "priority" >= $2 AND "priority" < $3 AND "owner" IS NULL',
@@ -61,12 +77,12 @@ test('getVueRef returns Shape rows in a Vue ref and cleans up with its scope', (
    assert.equal(shape.unsubscribed, true)
 })
 
-test('firstResult resolves with the first Shape rows and cleans up its subscription', async () => {
+test('findMany resolves with the first Shape rows and cleans up its subscription', async () => {
    const app = { service: () => ({}) }
    electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
    const todo = app.createElectricModel('todos')
 
-   const rows = await todo.firstResult({ completed: false })
+   const rows = await todo.findMany({ completed: false })
 
    assert.deepEqual(rows, [{ uid: 'one', completed: false }])
    const stream = FakeStream.instances.at(-1)
@@ -74,6 +90,41 @@ test('firstResult resolves with the first Shape rows and cleans up its subscript
       where: '"completed" = $1', params: ['false'],
    })
    assert.equal(stream.shape.unsubscribed, true)
+})
+
+test('findMany unsubscribes when its Vue scope is disposed before a result', async () => {
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: DeferredShape })
+   const todo = app.createElectricModel('todos')
+   const scope = effectScope()
+   let result
+
+   scope.run(() => { result = todo.findMany({ completed: false }) })
+   const rejection = assert.rejects(result, error => error.name === 'EmptyError')
+   const shape = FakeStream.instances.at(-1).shape
+   assert.equal(shape.unsubscribed, undefined)
+
+   scope.stop()
+
+   await rejection
+   assert.equal(shape.unsubscribed, true)
+})
+
+test('findUnique resolves with the first matching row or null', async () => {
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
+   const todo = app.createElectricModel('todos')
+
+   assert.deepEqual(
+      await todo.findUnique({ uid: 'one' }),
+      { uid: 'one', completed: false },
+   )
+   assert.equal(FakeStream.instances.at(-1).shape.unsubscribed, true)
+
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: EmptyShape })
+   const emptyTodo = app.createElectricModel('todos')
+   assert.equal(await emptyTodo.findUnique({ uid: 'missing' }), null)
+   assert.equal(FakeStream.instances.at(-1).shape.unsubscribed, true)
 })
 
 test('model mutations retain the simple Express-X API', async () => {

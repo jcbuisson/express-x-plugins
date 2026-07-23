@@ -1,5 +1,5 @@
 import { Shape, ShapeStream } from '@electric-sql/client'
-import { firstValueFrom, Observable } from 'rxjs'
+import { firstValueFrom, Observable, Subject, takeUntil } from 'rxjs'
 import { getCurrentScope, onScopeDispose, ref } from 'vue'
 
 
@@ -13,9 +13,9 @@ import { getCurrentScope, onScopeDispose, ref } from 'vue'
  */
 export function electricClientPlugin(app, options = {}) {
    const shapePath = options.shapePath ?? '/electric/v1/shape'
-   // const ShapeStreamClass = options.ShapeStream ?? ShapeStream
-   // const ShapeClass = options.Shape ?? Shape
-   // const ObservableClass = options.Observable ?? Observable
+   const ShapeStreamClass = options.ShapeStream ?? ShapeStream
+   const ShapeClass = options.Shape ?? Shape
+   const ObservableClass = options.Observable ?? Observable
 
    function createElectricModel(modelName, modelOptions = {}) {
       quoteIdentifier(modelName)
@@ -26,16 +26,13 @@ export function electricClientPlugin(app, options = {}) {
       function getObservable(where = {}) {
          // Validate eagerly
          const filterParams = whereToElectricParams(where)
-         return new Observable(subscriber => {
-         // return new ObservableClass(subscriber => {
-            const stream = new ShapeStream({
-            // const stream = new ShapeStreamClass({
+         return new ObservableClass(subscriber => {
+            const stream = new ShapeStreamClass({
                ...streamOptions,
                url,
                params: { ...streamOptions.params, ...filterParams },
             })
-            const shape = new Shape(stream)
-            // const shape = new ShapeClass(stream)
+            const shape = new ShapeClass(stream)
             let previous
             const unsubscribe = shape.subscribe(({ rows }) => {
                const current = [...rows]
@@ -58,7 +55,19 @@ export function electricClientPlugin(app, options = {}) {
       }
 
       function findMany(where = {}) {
-         return firstValueFrom(getObservable(where))
+         const observable = getObservable(where)
+         if (!getCurrentScope()) return firstValueFrom(observable)
+
+         const scopeDisposed = new Subject()
+         onScopeDispose(() => {
+            scopeDisposed.next()
+            scopeDisposed.complete()
+         })
+         return firstValueFrom(observable.pipe(takeUntil(scopeDisposed)))
+      }
+
+      function findUnique(where = {}) {
+         return findMany(where).then(rows => rows[0] ?? null)
       }
 
       async function create(data) {
@@ -80,7 +89,7 @@ export function electricClientPlugin(app, options = {}) {
          return value
       }
 
-      return { getObservable, getVueRef, findMany, create, update, remove }
+      return { getObservable, getVueRef, findMany, findUnique, create, update, remove }
    }
 
    return Object.assign(app, { createElectricModel })

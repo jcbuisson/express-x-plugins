@@ -42,7 +42,7 @@ This registers one Express-X service per model with the familiar API:
 - `updateWithMeta(uid, data, updatedAt)`
 - `deleteWithMeta(uid, deletedAt)`
 
-Synchronized reads are provided client-side by `getObservable(where)` below;
+Synchronized reads are provided client-side by `findMany(where)`, `findUnique(where)`, and `getObservable(where)` below;
 one-shot server reads would bypass Electric and are intentionally omitted.
 
 Mutation results remain `[value, meta]` tuples for compatibility. `meta.txid`
@@ -54,11 +54,8 @@ wait for the matching transaction in its Shape stream.
 Install the optional client dependencies in the browser application:
 
 ```sh
-npm install @jcbuisson/express-x-electric @electric-sql/client rxjs
+npm install @jcbuisson/express-x-electric @electric-sql/client rxjs vue
 ```
-
-Configure the client plugin and use the same `getObservable(where)` style as
-`express-x-client`'s offline model:
 
 ```js
 import { electricClientPlugin } from '@jcbuisson/express-x-electric/client'
@@ -68,6 +65,10 @@ app.configure(electricClientPlugin, {
 })
 
 const todo = app.createElectricModel('todos')
+
+const incompleteTodos = await todo.findMany({ completed: false })
+const selectedTodo = await todo.findUnique({ uid })
+
 const subscription = todo.getObservable({ completed: false }).subscribe(rows => {
   console.log(rows)
 })
@@ -79,6 +80,12 @@ await todo.remove(uid)
 
 subscription.unsubscribe()
 ```
+
+`findMany(where)` resolves with all matching rows from the first synchronized Shape emission.
+
+`findUnique(where)` resolves with the first matching row, or `null` when there is no match.
+Both unsubscribe after their first emission; if called within a Vue scope, they also unsubscribe
+if that scope is disposed before a result arrives.
 
 Object filters use parameterized Electric Shape predicates. Exact values,
 `null`, and `gt`/`gte`/`lt`/`lte` ranges are supported.

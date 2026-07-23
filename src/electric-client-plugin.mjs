@@ -1,5 +1,5 @@
 import { Shape, ShapeStream } from '@electric-sql/client'
-import { Observable } from 'rxjs'
+import { firstValueFrom, Observable } from 'rxjs'
 import { getCurrentScope, onScopeDispose, ref } from 'vue'
 
 
@@ -13,9 +13,9 @@ import { getCurrentScope, onScopeDispose, ref } from 'vue'
  */
 export function electricClientPlugin(app, options = {}) {
    const shapePath = options.shapePath ?? '/electric/v1/shape'
-   const ShapeStreamClass = options.ShapeStream ?? ShapeStream
-   const ShapeClass = options.Shape ?? Shape
-   const ObservableClass = options.Observable ?? Observable
+   // const ShapeStreamClass = options.ShapeStream ?? ShapeStream
+   // const ShapeClass = options.Shape ?? Shape
+   // const ObservableClass = options.Observable ?? Observable
 
    function createElectricModel(modelName, modelOptions = {}) {
       quoteIdentifier(modelName)
@@ -24,15 +24,18 @@ export function electricClientPlugin(app, options = {}) {
       const streamOptions = modelOptions.streamOptions ?? {}
 
       function getObservable(where = {}) {
-         // Validate eagerly, as getObservable in express-x-client does.
+         // Validate eagerly
          const filterParams = whereToElectricParams(where)
-         return new ObservableClass(subscriber => {
-            const stream = new ShapeStreamClass({
+         return new Observable(subscriber => {
+         // return new ObservableClass(subscriber => {
+            const stream = new ShapeStream({
+            // const stream = new ShapeStreamClass({
                ...streamOptions,
                url,
                params: { ...streamOptions.params, ...filterParams },
             })
-            const shape = new ShapeClass(stream)
+            const shape = new Shape(stream)
+            // const shape = new ShapeClass(stream)
             let previous
             const unsubscribe = shape.subscribe(({ rows }) => {
                const current = [...rows]
@@ -42,7 +45,7 @@ export function electricClientPlugin(app, options = {}) {
                subscriber.next(current)
             })
             // Shape exposes errors as state. ShapeStream retries transient failures;
-            // callers keep one observable subscription across reconnects.
+            // callers keep one observable subscription across reconnects
             return () => unsubscribe()
          })
       }
@@ -52,6 +55,10 @@ export function electricClientPlugin(app, options = {}) {
          const subscription = getObservable(where).subscribe(rows => { value.value = rows })
          if (getCurrentScope()) onScopeDispose(() => subscription.unsubscribe())
          return value
+      }
+
+      function findMany(where = {}) {
+         return firstValueFrom(getObservable(where))
       }
 
       async function create(data) {
@@ -73,7 +80,7 @@ export function electricClientPlugin(app, options = {}) {
          return value
       }
 
-      return { getObservable, getVueRef, create, update, remove }
+      return { getObservable, getVueRef, findMany, create, update, remove }
    }
 
    return Object.assign(app, { createElectricModel })

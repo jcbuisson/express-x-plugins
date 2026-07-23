@@ -61,6 +61,21 @@ test('getVueRef returns Shape rows in a Vue ref and cleans up with its scope', (
    assert.equal(shape.unsubscribed, true)
 })
 
+test('firstResult resolves with the first Shape rows and cleans up its subscription', async () => {
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
+   const todo = app.createElectricModel('todos')
+
+   const rows = await todo.firstResult({ completed: false })
+
+   assert.deepEqual(rows, [{ uid: 'one', completed: false }])
+   const stream = FakeStream.instances.at(-1)
+   assert.deepEqual(stream.options.params, {
+      where: '"completed" = $1', params: ['false'],
+   })
+   assert.equal(stream.shape.unsubscribed, true)
+})
+
 test('model mutations retain the simple Express-X API', async () => {
    const calls = []
    const service = {

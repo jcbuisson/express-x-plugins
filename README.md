@@ -1,23 +1,43 @@
-# express-x-electric
+# express-x-plugins
 
-The smallest useful ElectricSQL integration for Express-X. Express-X handles
-authorized PostgreSQL mutations; Electric's Shape API streams those changes to
-clients: Electric is the sync engine.
+Currently includes:
+
+- a plugin which preserves room membership and socket data across page reloads
+- a plugin integrating ElectricSQL sync engine into express-x, which greatly simplifies relational database
+access and provides powerful local-first features
+
 
 ## Install
 
 ```sh
-npm install @jcbuisson/express-x-electric pg
+npm install @jcbuisson/express-x-plugins
 ```
 
-This server-only installation does not install the browser Electric client or RxJS.
 
-## Server
+## Reload plugin
+
+### Server
+
+```js
+import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
+```
+
+
+## Local-first Postgres plugin
+
+The smallest useful ElectricSQL integration for Express-X. Express-X handles authorized PostgreSQL mutations;
+Electric's Shape API streams those changes to clients: Electric is the sync engine.
+
+### Server
+
+```sh
+npm install pg
+```
 
 ```js
 import { Pool } from 'pg'
-import { expressX } from '@jcbuisson/express-x'
-import { electricOfflinePlugin } from '@jcbuisson/express-x-electric'
+import { expressX } from '@jcbuisson/express-x/server'
+import { electricOfflinePlugin } from '@jcbuisson/express-x-plugins/electric-server'
 
 const app = expressX()
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
@@ -49,16 +69,16 @@ Mutation results remain `[value, meta]` tuples for compatibility. `meta.txid`
 contains `pg_current_xact_id()` and can be passed to an Electric-aware client to
 wait for the matching transaction in its Shape stream.
 
-## Client Shape
+### Client
 
 Install the optional client dependencies in the browser application:
 
 ```sh
-npm install @jcbuisson/express-x-electric @electric-sql/client rxjs vue
+npm install @electric-sql/client rxjs
 ```
 
 ```js
-import { electricClientPlugin } from '@jcbuisson/express-x-electric/client'
+import { electricClientPlugin } from '@jcbuisson/express-x-plugins/electric-client'
 
 app.configure(electricClientPlugin, {
   shapePath: '/electric/v1/shape',
@@ -93,7 +113,7 @@ Object filters use parameterized Electric Shape predicates. Exact values,
 All Electric cursor parameters are forwarded. The client cannot override the
 configured table, and Electric source credentials stay server-side.
 
-## Model configuration
+### Model configuration
 
 Models may be strings (table, service name, and default `uid` key) or objects:
 
@@ -108,7 +128,7 @@ Requires Node 18+ for the built-in Fetch API. The PostgreSQL client only needs a
 `query(sql, values)` method; a `pg.Pool` is recommended so each mutation and its
 transaction ID are captured in the same transaction.
 
-## Run Electric from Docker
+### Run Electric from Docker
 
 A local install of the Electric sync engine requires Elixir and Erlang; it is simpler to use a pre-built Docker image.
 

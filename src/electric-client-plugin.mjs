@@ -10,6 +10,7 @@ import { getCurrentScope, onScopeDispose, ref } from 'vue'
  *   electricClientPlugin(app)
  *   const todo = app.createElectricModel('todos')
  *   todo.getObservable({ completed: false }).subscribe(...)
+ *   const completedTodos = await todo.findMany({ completed: false })
  */
 export function electricClientPlugin(app, options = {}) {
    const shapePath = options.shapePath ?? '/electric/v1/shape'
@@ -47,13 +48,6 @@ export function electricClientPlugin(app, options = {}) {
          })
       }
 
-      function getVueRef(where = {}) {
-         const value = ref([])
-         const subscription = getObservable(where).subscribe(rows => { value.value = rows })
-         if (getCurrentScope()) onScopeDispose(() => subscription.unsubscribe())
-         return value
-      }
-
       function findMany(where = {}) {
          const observable = getObservable(where)
          if (!getCurrentScope()) return firstValueFrom(observable)
@@ -64,10 +58,6 @@ export function electricClientPlugin(app, options = {}) {
             scopeDisposed.complete()
          })
          return firstValueFrom(observable.pipe(takeUntil(scopeDisposed)))
-      }
-
-      function findUnique(where = {}) {
-         return findMany(where).then(rows => rows[0] ?? null)
       }
 
       async function create(data) {
@@ -89,7 +79,7 @@ export function electricClientPlugin(app, options = {}) {
          return value
       }
 
-      return { getObservable, getVueRef, findMany, findUnique, create, update, remove }
+      return { getObservable, findMany, create, update, remove }
    }
 
    return Object.assign(app, { createElectricModel })

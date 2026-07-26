@@ -130,9 +130,9 @@ test('findUnique resolves with the first matching row or null', async () => {
 test('model mutations retain the simple Express-X API', async () => {
    const calls = []
    const service = {
-      async createWithMeta(...args) { calls.push(['create', ...args]); return [{ uid: args[0], ...args[1] }, {}] },
-      async updateWithMeta(...args) { calls.push(['update', ...args]); return [{ uid: args[0], ...args[1] }, {}] },
-      async deleteWithMeta(...args) { calls.push(['remove', ...args]); return [{ uid: args[0] }, {}] },
+      async create(...args) { calls.push(['create', ...args]); return { uid: args[0], ...args[1] } },
+      async update(...args) { calls.push(['update', ...args]); return { uid: args[0], ...args[1] } },
+      async delete(...args) { calls.push(['remove', ...args]); return { uid: args[0] } },
    }
    const app = { service: () => service }
    electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })

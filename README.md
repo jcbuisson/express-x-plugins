@@ -58,16 +58,14 @@ app.configure(electricOfflinePlugin, db, [
 
 This registers one Express-X service per model with the familiar API:
 
-- `createWithMeta(uid, data, createdAt)`
-- `updateWithMeta(uid, data, updatedAt)`
-- `deleteWithMeta(uid, deletedAt)`
+- `create(uid, data)`
+- `update(uid, data)`
+- `delete(uid)`
 
 Synchronized reads are provided client-side by `findMany(where)`, `findUnique(where)`, and `getObservable(where)` below;
 one-shot server reads would bypass Electric and are intentionally omitted.
 
-Mutation results remain `[value, meta]` tuples for compatibility. `meta.txid`
-contains `pg_current_xact_id()` and can be passed to an Electric-aware client to
-wait for the matching transaction in its Shape stream.
+Mutation methods return the created, updated, or deleted row directly.
 
 ### Client
 

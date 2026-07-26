@@ -64,19 +64,15 @@ export function electricClientPlugin(app, options = {}) {
          assertPlainObject(data, 'mutation data')
          const uid = globalThis.crypto?.randomUUID?.()
          if (!uid) throw new Error('crypto.randomUUID() is required')
-         const now = new Date().toISOString()
-         const [value] = await service.createWithMeta(uid, data, now)
-         return value
+         return service.create(uid, data)
       }
 
       async function update(uid, data) {
-         const [value] = await service.updateWithMeta(uid, data, new Date().toISOString())
-         return value
+         return service.update(uid, data)
       }
 
       async function remove(uid) {
-         const [value] = await service.deleteWithMeta(uid, new Date().toISOString())
-         return value
+         return service.delete(uid)
       }
 
       return { getObservable, findMany, create, update, remove }

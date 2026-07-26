@@ -50,10 +50,9 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
          //    return (await db.query(sql, values)).rows
          // },
 
-         createWithMeta: async function(uid, data, createdAt = new Date()) {
-            await authorize(this, model.name, 'createWithMeta', [uid, data, createdAt])
+         create: async function(uid, data) {
+            await authorize(this, model.name, 'create', [uid, data])
             assertPlainObject(data, 'mutation data')
-            const timestamp = normalizeTimestamp(createdAt, 'created_at')
             const safeData = { ...data, [model.primaryKey]: uid }
             const entries = Object.entries(safeData).filter(([, value]) => value !== undefined)
             const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
@@ -71,34 +70,29 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
                   + ' RETURNING *',
                   values,
                )
-               const txid = await transactionId(client)
-               return [result.rows[0], mutationMeta(uid, 'created_at', timestamp, txid)]
+               return result.rows[0]
             })
          },
 
-         updateWithMeta: async function(uid, data, updatedAt = new Date()) {
-            await authorize(this, model.name, 'updateWithMeta', [uid, data, updatedAt])
-            const timestamp = normalizeTimestamp(updatedAt, 'updated_at')
+         update: async function(uid, data) {
+            await authorize(this, model.name, 'update', [uid, data])
             const set = buildSet(data)
             return withTransaction(db, async client => {
                const result = await client.query(
                   `UPDATE ${model.quotedTable} SET ${set.sql} WHERE ${model.quotedPrimaryKey} = $${set.values.length + 1} RETURNING *`,
                   [...set.values, uid],
                )
-               const txid = await transactionId(client)
-               return [result.rows[0], mutationMeta(uid, 'updated_at', timestamp, txid)]
+               return result.rows[0]
             })
          },
 
-         deleteWithMeta: async function(uid, deletedAt = new Date()) {
-            await authorize(this, model.name, 'deleteWithMeta', [uid, deletedAt])
-            const timestamp = normalizeTimestamp(deletedAt, 'deleted_at')
+         delete: async function(uid) {
+            await authorize(this, model.name, 'delete', [uid])
             return withTransaction(db, async client => {
                const result = await client.query(
                   `DELETE FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 RETURNING *`, [uid],
                )
-               const txid = await transactionId(client)
-               return [result.rows[0], mutationMeta(uid, 'deleted_at', timestamp, txid)]
+               return result.rows[0]
             })
          },
       })
@@ -224,21 +218,6 @@ async function withTransaction(db, operation) {
    } finally {
       client.release()
    }
-}
-
-async function transactionId(client) {
-   const result = await client.query('SELECT pg_current_xact_id()::text AS txid')
-   return result.rows[0]?.txid
-}
-
-function mutationMeta(uid, field, timestamp, txid) {
-   return { uid, created_at: null, updated_at: null, deleted_at: null, [field]: timestamp, txid }
-}
-
-function normalizeTimestamp(value, field) {
-   const timestamp = new Date(value)
-   if (Number.isNaN(timestamp.getTime())) throw new TypeError(`${field} must be a valid timestamp`)
-   return timestamp.toISOString()
 }
 
 function copyResponseHeaders(source, target) {

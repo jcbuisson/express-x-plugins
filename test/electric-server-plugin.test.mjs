@@ -10,7 +10,6 @@ function fixture({ authorize = async () => true, fetch } = {}) {
    const db = {
       async query(sql, values = []) {
          queries.push({ sql, values })
-         if (sql.startsWith('SELECT pg_current')) return { rows: [{ txid: '42' }] }
          return { rows: [{ uid: values.at(-1) ?? 'one', label: 'row' }] }
       },
    }
@@ -22,27 +21,25 @@ function fixture({ authorize = async () => true, fetch } = {}) {
    return { app, db, services, routes, queries, registration }
 }
 
-test('registers the familiar mutation API', async () => {
+test('registers the mutation API', async () => {
    const { services, queries } = fixture()
    const service = services.get('todos')
    assert.deepEqual(Object.keys(service), [
-      'createWithMeta', 'updateWithMeta', 'deleteWithMeta',
+      'create', 'update', 'delete',
    ])
 
-   const [, meta] = await service.createWithMeta.call({}, 'one', { label: 'new' }, '2026-01-01T00:00:00Z')
-   assert.equal(meta.uid, 'one')
-   assert.equal(meta.txid, '42')
-   assert.equal(meta.created_at, '2026-01-01T00:00:00.000Z')
+   const value = await service.create.call({}, 'one', { label: 'new' })
+   assert.equal(value.uid, 'one')
 
-   await service.createWithMeta.call({}, 'only-id', {}, '2026-01-01T00:00:00Z')
-   assert.match(queries[2].sql, /DO UPDATE SET "uid" = EXCLUDED\."uid"/)
-   await assert.rejects(service.createWithMeta.call({}, 'bad', [], new Date()), /plain object/)
+   await service.create.call({}, 'only-id', {})
+   assert.match(queries[1].sql, /DO UPDATE SET "uid" = EXCLUDED\."uid"/)
+   await assert.rejects(service.create.call({}, 'bad', []), /plain object/)
 })
 
 test('requires authorization and reports forbidden calls', async () => {
    const { services } = fixture({ authorize: async () => false })
    await assert.rejects(
-      services.get('todos').createWithMeta.call({}, 'one', { label: 'no' }, new Date()),
+      services.get('todos').create.call({}, 'one', { label: 'no' }),
       error => error.code === 'forbidden',
    )
 })

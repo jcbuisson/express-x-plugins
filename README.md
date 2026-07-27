@@ -1,4 +1,9 @@
+
 # express-x-plugins
+
+
+IMPORTANT: set lc_messages=C for the PostgreSQL chris role so Electric receives recognizable English errors.
+
 
 Currently includes:
 

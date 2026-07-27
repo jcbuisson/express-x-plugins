@@ -143,3 +143,25 @@ test('model mutations retain the simple Express-X API', async () => {
    await todo.remove(created.uid)
    assert.deepEqual(calls.map(call => call[0]), ['create', 'update', 'remove'])
 })
+
+test('model creation supports server-generated IDs', async () => {
+   const calls = []
+   const service = {
+      async create(...args) { calls.push(args); return { id: 42, ...args[0] } },
+   }
+   const app = { service: () => service }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
+   const todo = app.createElectricModel('todos', { idGeneration: 'server' })
+
+   assert.deepEqual(await todo.create({ title: 'Test' }), { id: 42, title: 'Test' })
+   assert.deepEqual(calls, [[{ title: 'Test' }]])
+})
+
+test('rejects an unsupported ID generation strategy', () => {
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
+   assert.throws(
+      () => app.createElectricModel('todos', { idGeneration: 'database-ish' }),
+      /idGeneration/,
+   )
+})

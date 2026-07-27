@@ -28,69 +28,81 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
 
    for (const model of configuredModels) {
       app.createService(model.name, {
-         // findUnique: async function(where) {
-         //    await authorize(this, model.name, 'findUnique', [where])
-         //    const filter = buildWhere(where)
-         //    const result = await db.query(`SELECT * FROM ${model.quotedTable} WHERE ${filter.sql} LIMIT 1`, filter.values)
-         //    return result.rows[0] ?? null
-         // },
+         findUnique: async function(where) {
+            await authorize(this, model.name, 'findUnique', [where])
+            const filter = buildWhere(where)
+            const result = await db.query(`SELECT * FROM ${model.quotedTable} WHERE ${filter.sql} LIMIT 1`, filter.values)
+            return result.rows[0] ?? null
+         },
 
-         // findMany: async function(where, queryOptions = {}) {
-         //    await authorize(this, model.name, 'findMany', [where, queryOptions])
-         //    const filter = buildWhere(where)
-         //    let sql = `SELECT * FROM ${model.quotedTable} WHERE ${filter.sql}`
-         //    const values = [...filter.values]
-         //    if (queryOptions.limit != null) {
-         //       if (!Number.isInteger(queryOptions.limit) || queryOptions.limit < 1) {
-         //          throw new TypeError('limit must be a positive integer')
-         //       }
-         //       values.push(queryOptions.limit)
-         //       sql += ` LIMIT $${values.length}`
-         //    }
-         //    return (await db.query(sql, values)).rows
-         // },
+         findMany: async function(where, queryOptions = {}) {
+            await authorize(this, model.name, 'findMany', [where, queryOptions])
+            const filter = buildWhere(where)
+            let sql = `SELECT * FROM ${model.quotedTable} WHERE ${filter.sql}`
+            const values = [...filter.values]
+            if (queryOptions.limit != null) {
+               if (!Number.isInteger(queryOptions.limit) || queryOptions.limit < 1) {
+                  throw new TypeError('limit must be a positive integer')
+               }
+               values.push(queryOptions.limit)
+               sql += ` LIMIT $${values.length}`
+            }
+            return (await db.query(sql, values)).rows
+         },
 
-         create: async function(uid, data) {
-            await authorize(this, model.name, 'create', [uid, data])
-            assertPlainObject(data, 'mutation data')
-            const safeData = { ...data, [model.primaryKey]: uid }
+         // create(data) (primary key is server-generated) or create(uid, data) (uid is the primary key, client-generated)
+         create: async function(idOrData, data) {
+            const hasClientId = data !== undefined
+            const mutationData = hasClientId ? data : idOrData
+            await authorize(this, model.name, 'create', hasClientId ? [idOrData, mutationData] : [mutationData])
+            assertPlainObject(mutationData, 'mutation data')
+            const safeData = hasClientId
+               ? { ...mutationData, [model.primaryKey]: idOrData }
+               : { ...mutationData }
             const entries = Object.entries(safeData).filter(([, value]) => value !== undefined)
             const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
             const values = entries.map(([, value]) => value)
             const parameters = values.map((_, index) => `$${index + 1}`)
-            const updateEntries = entries.filter(([column]) => column !== model.primaryKey)
-            const conflictAction = updateEntries.length
-               ? 'DO UPDATE SET ' + updateEntries
-                  .map(([column]) => `${quoteIdentifier(column, 'data column')} = EXCLUDED.${quoteIdentifier(column, 'data column')}`).join(', ')
-               : 'DO UPDATE SET ' + `${model.quotedPrimaryKey} = EXCLUDED.${model.quotedPrimaryKey}`
             return withTransaction(db, async client => {
+               if (entries.length === 0) {
+                  const result = await client.query(`INSERT INTO ${model.quotedTable} DEFAULT VALUES RETURNING *`)
+                  return result.rows[0]
+               }
+               const conflictAction = hasClientId
+                  ? ' ON CONFLICT (' + model.quotedPrimaryKey + ') DO UPDATE SET '
+                     + (entries.some(([column]) => column !== model.primaryKey)
+                        ? entries
+                           .filter(([column]) => column !== model.primaryKey)
+                           .map(([column]) => `${quoteIdentifier(column, 'data column')} = EXCLUDED.${quoteIdentifier(column, 'data column')}`)
+                           .join(', ')
+                        : `${model.quotedPrimaryKey} = EXCLUDED.${model.quotedPrimaryKey}`)
+                  : ''
                const result = await client.query(
-                  `INSERT INTO ${model.quotedTable} (${columns.join(', ')}) VALUES (${parameters.join(', ')}) `
-                  + `ON CONFLICT (${model.quotedPrimaryKey}) ${conflictAction}`
-                  + ' RETURNING *',
+                  `INSERT INTO ${model.quotedTable} (${columns.join(', ')}) VALUES (${parameters.join(', ')})`
+                  + conflictAction + ' RETURNING *',
                   values,
                )
                return result.rows[0]
             })
          },
 
-         update: async function(uid, data) {
-            await authorize(this, model.name, 'update', [uid, data])
+         update: async function(id, data) {
+            await authorize(this, model.name, 'update', [id, data])
             const set = buildSet(data)
             return withTransaction(db, async client => {
                const result = await client.query(
                   `UPDATE ${model.quotedTable} SET ${set.sql} WHERE ${model.quotedPrimaryKey} = $${set.values.length + 1} RETURNING *`,
-                  [...set.values, uid],
+                  [...set.values, id],
                )
                return result.rows[0]
             })
          },
 
-         delete: async function(uid) {
-            await authorize(this, model.name, 'delete', [uid])
+         delete: async function(id) {
+            await authorize(this, model.name, 'delete', [id])
             return withTransaction(db, async client => {
                const result = await client.query(
-                  `DELETE FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 RETURNING *`, [uid],
+                  `DELETE FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 RETURNING *`, [id],
                )
                return result.rows[0]
             })
@@ -160,8 +172,7 @@ function normalizeModels(models) {
 }
 
 function assertPlainObject(value, label) {
-   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.prototype.toString.call(value) !== '[object Object]') {
+   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.prototype.toString.call(value) !== '[object Object]') {
       throw new TypeError(`${label} must be a plain object`)
    }
 }

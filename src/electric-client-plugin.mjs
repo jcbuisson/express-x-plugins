@@ -23,6 +23,10 @@ export function electricClientPlugin(app, options = {}) {
       const service = app.service(modelName)
       const url = modelOptions.url ?? modelPath(shapePath, modelName)
       const streamOptions = modelOptions.streamOptions ?? {}
+      const idGeneration = modelOptions.idGeneration ?? 'client'
+      if (!['client', 'server'].includes(idGeneration)) {
+         throw new TypeError("idGeneration must be 'client' or 'server'")
+      }
 
       function getObservable(where = {}) {
          // Validate eagerly
@@ -62,17 +66,18 @@ export function electricClientPlugin(app, options = {}) {
 
       async function create(data) {
          assertPlainObject(data, 'mutation data')
+         if (idGeneration === 'server') return service.create(data)
          const uid = globalThis.crypto?.randomUUID?.()
          if (!uid) throw new Error('crypto.randomUUID() is required')
          return service.create(uid, data)
       }
 
-      async function update(uid, data) {
-         return service.update(uid, data)
+      async function update(id, data) {
+         return service.update(id, data)
       }
 
-      async function remove(uid) {
-         return service.delete(uid)
+      async function remove(id) {
+         return service.delete(id)
       }
 
       return { getObservable, findMany, create, update, remove }

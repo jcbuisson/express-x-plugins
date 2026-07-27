@@ -58,9 +58,10 @@ app.configure(electricOfflinePlugin, db, [
 
 This registers one Express-X service per model with the familiar API:
 
-- `create(uid, data)`
-- `update(uid, data)`
-- `delete(uid)`
+- `create(id, data)` for a client-generated primary key
+- `create(data)` for a database-generated primary key
+- `update(id, data)`
+- `delete(id)`
 
 Synchronized reads are provided client-side by `findMany(where)`, `findUnique(where)`, and `getObservable(where)` below;
 one-shot server reads would bypass Electric and are intentionally omitted.
@@ -82,7 +83,13 @@ app.configure(electricClientPlugin, {
   shapePath: '/electric/v1/shape',
 })
 
+// Client-generated UUID stored in the default `uid` primary key:
 const todo = app.createElectricModel('todos')
+
+// Or, for a database-generated primary key such as SERIAL/IDENTITY:
+const numberedTodo = app.createElectricModel('numberedTodos', {
+  idGeneration: 'server',
+})
 
 const incompleteTodos = await todo.findMany({ completed: false })
 const selectedTodo = await todo.findUnique({ uid })
@@ -95,6 +102,9 @@ const subscription = todo.getObservable({ completed: false }).subscribe(rows => 
 await todo.create({ title: 'Learn Shapes', completed: false })
 await todo.update(uid, { completed: true })
 await todo.remove(uid)
+
+const created = await numberedTodo.create({ title: 'Assigned by PostgreSQL' })
+console.log(created.id)
 
 subscription.unsubscribe()
 ```
@@ -113,7 +123,7 @@ configured table, and Electric source credentials stay server-side.
 
 ### Model configuration
 
-Models may be strings (table, service name, and default `uid` key) or objects:
+Server models may be strings (table, service name, and default `uid` key) or objects:
 
 ```js
 { name: 'todo', table: 'todos', primaryKey: 'id' }
@@ -121,6 +131,10 @@ Models may be strings (table, service name, and default `uid` key) or objects:
 
 Names are restricted to simple PostgreSQL identifiers. Values are always sent
 as query parameters; range filters support `gt`, `gte`, `lt`, and `lte`.
+
+Client models default to `idGeneration: 'client'`, which generates a UUID and calls
+`create(id, data)`. Set `idGeneration: 'server'` to call `create(data)` and let a
+PostgreSQL default, sequence, or identity column generate the primary key.
 
 Requires Node 18+ for the built-in Fetch API. The PostgreSQL client only needs a
 `query(sql, values)` method; a `pg.Pool` is recommended so each mutation and its

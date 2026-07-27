@@ -36,6 +36,18 @@ test('registers the mutation API', async () => {
    await assert.rejects(service.create.call({}, 'bad', []), /plain object/)
 })
 
+test('allows the database to generate a primary key', async () => {
+   const { services, queries } = fixture()
+   const service = services.get('todos')
+
+   await service.create.call({}, { label: 'generated id' })
+   assert.match(queries[0].sql, /^INSERT INTO "todos" \("label"\) VALUES \(\$1\) RETURNING \*$/)
+   assert.doesNotMatch(queries[0].sql, /ON CONFLICT/)
+
+   await service.create.call({}, {})
+   assert.equal(queries[1].sql, 'INSERT INTO "todos" DEFAULT VALUES RETURNING *')
+})
+
 test('requires authorization and reports forbidden calls', async () => {
    const { services } = fixture({ authorize: async () => false })
    await assert.rejects(

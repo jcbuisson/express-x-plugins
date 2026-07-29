@@ -26,8 +26,10 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
       }
    }
 
+   // for each model 'name', there is a service 'name' with methods 'findUnique', 'findMany', 'create', 'update', 'delete'
    for (const model of configuredModels) {
       app.createService(model.name, {
+
          findUnique: async function(where) {
             await authorize(this, model.name, 'findUnique', [where])
             const filter = buildWhere(where)
@@ -50,7 +52,8 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
             return (await db.query(sql, values)).rows
          },
 
-         // create(data) (primary key is server-generated) or create(uid, data) (uid is the primary key, client-generated)
+         // create(data): the primary key is server-generated
+         // create(uid, data): uid (the primary key) is provided by the client
          create: async function(idOrData, data) {
             const hasClientId = data !== undefined
             const mutationData = hasClientId ? data : idOrData

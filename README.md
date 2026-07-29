@@ -2,7 +2,20 @@
 # express-x-plugins
 
 
-IMPORTANT: set lc_messages=C for the PostgreSQL chris role so Electric receives recognizable English errors.
+IMPORTANT
+
+# set lc_messages=C for the PostgreSQL role so Electric receives recognizable English errors
+ALTER ROLE chris SET lc_messages = 'C';
+
+# ALLOW POSTGRES LOGICAL REPLICATION
+ALTER SYSTEM SET wal_level = 'logical';
+ALTER SYSTEM SET max_replication_slots = 10;
+ALTER SYSTEM SET max_wal_senders = 10;
+ALTER ROLE chris WITH REPLICATION;
+
+## restart postgres
+sudo systemctl restart postgresql
+
 
 
 Currently includes:
@@ -63,13 +76,16 @@ app.configure(electricOfflinePlugin, db, [
 
 This registers one Express-X service per model with the familiar API:
 
+- `findUnique(where)`
+- `findMany(where, queryOptions)`
 - `create(id, data)` for a client-generated primary key
 - `create(data)` for a database-generated primary key
 - `update(id, data)`
 - `delete(id)`
 
-Synchronized reads are provided client-side by `findMany(where)`, `findUnique(where)`, and `getObservable(where)` below;
-one-shot server reads would bypass Electric and are intentionally omitted.
+The client model provides synchronized reads through `findMany(where)` and
+`getObservable(where)`. The service also exposes direct one-shot server reads
+when synchronization is not required.
 
 Mutation methods return the created, updated, or deleted row directly.
 
@@ -97,7 +113,6 @@ const numberedTodo = app.createElectricModel('numberedTodos', {
 })
 
 const incompleteTodos = await todo.findMany({ completed: false })
-const selectedTodo = await todo.findUnique({ uid })
 
 const subscription = todo.getObservable({ completed: false }).subscribe(rows => {
   console.log(rows)
@@ -116,9 +131,8 @@ subscription.unsubscribe()
 
 `findMany(where)` resolves with all matching rows from the first synchronized Shape emission.
 
-`findUnique(where)` resolves with the first matching row, or `null` when there is no match.
-Both unsubscribe after their first emission; if called within a Vue scope, they also unsubscribe
-if that scope is disposed before a result arrives.
+It unsubscribes after the first emission; if called within a Vue scope, it also
+unsubscribes if that scope is disposed before a result arrives.
 
 Object filters use parameterized Electric Shape predicates. Exact values,
 `null`, and `gt`/`gte`/`lt`/`lte` ranges are supported.
@@ -156,8 +170,16 @@ services:
     environment:
       DATABASE_URL: postgresql://user:password@host.docker.internal:5432/mydb
       ELECTRIC_INSECURE: "true"
+      ELECTRIC_STORAGE: FAST_FILE
+      ELECTRIC_PERSISTENT_STATE: FILE
+      ELECTRIC_STORAGE_DIR: /var/lib/electric
     ports:
       - "3001:3000"
+    volumes:
+      - electric_mydb_data:/var/lib/electric
+
+volumes:
+  electric_mydb_data:
 ```
 
 ```

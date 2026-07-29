@@ -2,20 +2,31 @@ import { Shape, ShapeStream } from '@electric-sql/client'
 import { firstValueFrom, Observable, Subject, takeUntil } from 'rxjs'
 import { getCurrentScope, onScopeDispose, ref } from 'vue'
 
+export class DisposableShape extends Shape {
+   subscribe(callback) {
+      const unsubscribe = super.subscribe(callback)
+      return () => {
+         unsubscribe()
+         if (this.numSubscribers === 0) this.stream.unsubscribeAll()
+      }
+   }
+}
+
 
 /**
  * Add Electric-backed reactive models to an Express-X client.
  *
  * Usage:
  *   electricClientPlugin(app)
- *   const todo = app.createElectricModel('todos')
+ *   const todo = app.createElectricModel('todos') // primary key is provided by client
+ *   const todo = app.createElectricModel('todos', { idGeneration: 'server' }) // primary key is server-generated
  *   todo.getObservable({ completed: false }).subscribe(...)
  *   const completedTodos = await todo.findMany({ completed: false })
  */
 export function electricClientPlugin(app, options = {}) {
    const shapePath = options.shapePath ?? '/electric/v1/shape'
    const ShapeStreamClass = options.ShapeStream ?? ShapeStream
-   const ShapeClass = options.Shape ?? Shape
+   const ShapeClass = options.Shape ?? DisposableShape
    const ObservableClass = options.Observable ?? Observable
 
    function createElectricModel(modelName, modelOptions = {}) {

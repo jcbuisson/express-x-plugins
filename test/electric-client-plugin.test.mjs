@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { effectScope, isRef } from 'vue'
 
-import { electricClientPlugin, whereToElectricParams } from '../src/electric-client-plugin.mjs'
+import {
+   DisposableShape,
+   electricClientPlugin,
+   whereToElectricParams,
+} from '../src/electric-client-plugin.mjs'
 
 class FakeStream {
    static instances = []
@@ -35,6 +39,19 @@ class EmptyShape {
       return () => { this.unsubscribed = true }
    }
 }
+
+test('DisposableShape tears down its stream with its last subscriber', () => {
+   const stream = {
+      subscribe() { return () => {} },
+      unsubscribeAll() { this.unsubscribed = true },
+   }
+   const shape = new DisposableShape(stream)
+   const unsubscribe = shape.subscribe(() => {})
+
+   unsubscribe()
+
+   assert.equal(stream.unsubscribed, true)
+})
 
 test('translates where objects into parameterized Electric filters', () => {
    assert.deepEqual(whereToElectricParams({ completed: false, priority: { gte: 2, lt: 5 }, owner: null }), {

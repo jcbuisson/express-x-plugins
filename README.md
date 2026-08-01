@@ -2,7 +2,7 @@
 # express-x-plugins
 
 
-IMPORTANT
+IMPORTANT FOR ELECTRIC
 
 # set lc_messages=C for the PostgreSQL role so Electric receives recognizable English errors
 ALTER ROLE chris SET lc_messages = 'C';
@@ -13,9 +13,10 @@ ALTER SYSTEM SET max_replication_slots = 10;
 ALTER SYSTEM SET max_wal_senders = 10;
 ALTER ROLE chris WITH REPLICATION;
 
-## restart postgres
-sudo systemctl restart postgresql
+(restart postgres: `sudo systemctl restart postgresql`)
 
+## Use HTTP2
+nginx: `listen 443 ssl http2;`
 
 
 Currently includes:

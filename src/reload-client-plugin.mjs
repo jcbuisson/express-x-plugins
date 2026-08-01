@@ -1,3 +1,5 @@
+import { useSessionStorage } from '@vueuse/core'
+
 /**
  * Enrich `app` with listeners handling socket data transfer on page reload
  *

@@ -2,17 +2,6 @@ import { Shape, ShapeStream } from '@electric-sql/client'
 import { firstValueFrom, Observable, Subject, takeUntil } from 'rxjs'
 import { getCurrentScope, onScopeDispose, ref } from 'vue'
 
-export class DisposableShape extends Shape {
-   subscribe(callback) {
-      const unsubscribe = super.subscribe(callback)
-      return () => {
-         unsubscribe()
-         if (this.numSubscribers === 0) this.stream.unsubscribeAll()
-      }
-   }
-}
-
-
 /**
  * Add Electric-backed reactive models to an Express-X client.
  *
@@ -99,6 +88,16 @@ export function electricClientPlugin(app, options = {}) {
 
 
 //////////////////////                   UTILITIES                   //////////////////////
+
+export class DisposableShape extends Shape {
+   subscribe(callback) {
+      const unsubscribe = super.subscribe(callback)
+      return () => {
+         unsubscribe()
+         if (this.numSubscribers === 0) this.stream.unsubscribeAll()
+      }
+   }
+}
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }

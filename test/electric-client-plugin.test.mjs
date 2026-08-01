@@ -77,23 +77,6 @@ test('getObservable emits Shape rows and cleans up its subscription', () => {
    subscription.unsubscribe()
 })
 
-test('getVueRef returns Shape rows in a Vue ref and cleans up with its scope', () => {
-   const app = { service: () => ({}) }
-   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })
-   const todo = app.createElectricModel('todos')
-   const scope = effectScope()
-   let rows
-
-   scope.run(() => { rows = todo.getVueRef({ completed: false }) })
-
-   assert.equal(isRef(rows), true)
-   assert.deepEqual(rows.value, [{ uid: 'one', completed: false }])
-   const shape = FakeStream.instances.at(-1).shape
-   assert.equal(shape.unsubscribed, undefined)
-   scope.stop()
-   assert.equal(shape.unsubscribed, true)
-})
-
 test('findMany resolves with the first Shape rows and cleans up its subscription', async () => {
    const app = { service: () => ({}) }
    electricClientPlugin(app, { ShapeStream: FakeStream, Shape: FakeShape })

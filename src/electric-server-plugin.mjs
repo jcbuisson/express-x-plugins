@@ -191,7 +191,7 @@ function buildWhere(where, startIndex = 1) {
          clauses.push(`${quotedColumn} IS NULL`)
          continue
       }
-      if (constraint && typeof constraint === 'object' && !Array.isArray(constraint)) {
+      if (constraint && typeof constraint === 'object' && !Array.isArray(constraint) && !(constraint instanceof Date)) {
          const entries = Object.entries(constraint)
          if (entries.length === 0 || entries.some(([operator]) => !RANGE_OPERATORS[operator])) {
             throw new TypeError(`unsupported where constraint for '${column}'`)

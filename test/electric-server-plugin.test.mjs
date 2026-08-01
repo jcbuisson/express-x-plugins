@@ -74,6 +74,19 @@ test('protects the configured primary key during updates', async () => {
    assert.deepEqual(queries[0].values, ['editable', 'Ada', 7])
 })
 
+test('accepts Date values in server-side filters', async () => {
+   const { services, queries } = fixture()
+   const createdAt = new Date('2026-08-01T12:00:00.000Z')
+
+   await services.get('todos').findUnique.call({}, { createdAt })
+
+   assert.equal(
+      queries[0].sql,
+      'SELECT * FROM "todos" WHERE "createdAt" = $1 LIMIT 1',
+   )
+   assert.deepEqual(queries[0].values, [createdAt])
+})
+
 test('requires authorization and reports forbidden calls', async () => {
    const { services } = fixture({ authorize: async () => false })
    await assert.rejects(

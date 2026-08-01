@@ -1,5 +1,3 @@
-import { useSessionStorage } from '@vueuse/core'
-
 /**
  * Enrich `app` with listeners handling socket data transfer on page reload
  *
@@ -8,20 +6,18 @@ import { useSessionStorage } from '@vueuse/core'
  */
 export async function reloadPlugin(app) {
 
-   const cnxid = useSessionStorage('cnxid', '')
-   const cnxtoken = useSessionStorage('cnxtoken', '')
    const handleTransferToken = token => {
-      if (typeof token === 'string') cnxtoken.value = token
+      if (typeof token === 'string') sessionStorage.setItem('cnxtoken', token)
    }
 
    app.addConnectListener(async (socket) => {
       const socketId = socket.id
       console.log('connect', socketId)
-      const prevSocketId = cnxid.value
-      const prevTransferToken = cnxtoken.value
+      const prevSocketId = sessionStorage.getItem('cnxid') ?? ''
+      const prevTransferToken = sessionStorage.getItem('cnxtoken') ?? ''
       socket.off('cnx-transfer-token', handleTransferToken)
       socket.on('cnx-transfer-token', handleTransferToken)
-      cnxid.value = socketId
+      sessionStorage.setItem('cnxid', socketId)
       if (prevSocketId && prevTransferToken) {
          console.log('cnx-transfer', prevSocketId, 'to', socketId)
          let timeout

@@ -48,6 +48,32 @@ test('allows the database to generate a primary key', async () => {
    assert.equal(queries[1].sql, 'INSERT INTO "todos" DEFAULT VALUES RETURNING *')
 })
 
+test('protects the configured primary key during updates', async () => {
+   const services = new Map()
+   const queries = []
+   const db = {
+      async query(sql, values = []) {
+         queries.push({ sql, values })
+         return { rows: [] }
+      },
+   }
+   const app = {
+      createService(name, methods) { services.set(name, methods) },
+      get() {},
+   }
+   electricOfflinePlugin(app, db, [{ name: 'people', primaryKey: 'id' }], {
+      authorize: async () => true,
+   })
+
+   await services.get('people').update.call({}, 7, { id: 99, uid: 'editable', name: 'Ada' })
+
+   assert.equal(
+      queries[0].sql,
+      'UPDATE "people" SET "uid" = $1, "name" = $2 WHERE "id" = $3 RETURNING *',
+   )
+   assert.deepEqual(queries[0].values, ['editable', 'Ada', 7])
+})
+
 test('requires authorization and reports forbidden calls', async () => {
    const { services } = fixture({ authorize: async () => false })
    await assert.rejects(

@@ -91,7 +91,7 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
 
          update: async function(id, data) {
             await authorize(this, model.name, 'update', [id, data])
-            const set = buildSet(data)
+            const set = buildSet(data, model.primaryKey)
             return withTransaction(db, async client => {
                const result = await client.query(
                   `UPDATE ${model.quotedTable} SET ${set.sql} WHERE ${model.quotedPrimaryKey} = $${set.values.length + 1} RETURNING *`,
@@ -208,9 +208,9 @@ function buildWhere(where, startIndex = 1) {
    return { sql: clauses.length ? clauses.join(' AND ') : 'TRUE', values }
 }
 
-function buildSet(data, startIndex = 1) {
+function buildSet(data, primaryKey, startIndex = 1) {
    assertPlainObject(data, 'mutation data')
-   const entries = Object.entries(data).filter(([key, value]) => key !== 'uid' && value !== undefined)
+   const entries = Object.entries(data).filter(([key, value]) => key !== primaryKey && value !== undefined)
    if (entries.length === 0) throw new TypeError('mutation data must contain at least one field')
    return {
       sql: entries.map(([column], index) => `${quoteIdentifier(column, 'data column')} = $${startIndex + index}`).join(', '),

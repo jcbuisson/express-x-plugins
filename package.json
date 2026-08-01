@@ -33,6 +33,9 @@
   "scripts": {
     "test": "node --test"
   },
+  "dependencies": {
+    "@vueuse/core": "^14.4.0"
+  },
   "peerDependencies": {
     "@electric-sql/client": "^1.5.24",
     "rxjs": "^7.8.2",

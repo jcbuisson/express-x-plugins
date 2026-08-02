@@ -74,7 +74,7 @@ export async function reloadPlugin(app, options = {}) {
             // copy rooms
             for (const room of fromSocketRooms) {
                if (room === fromSocketId) continue // do not include room associated to socket#id
-               toSocket.join(room)
+               await toSocket.join(room)
             }
             // copy data
             toSocket.data = {

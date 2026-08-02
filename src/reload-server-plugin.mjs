@@ -19,11 +19,13 @@ export async function reloadPlugin(app, options = {}) {
    const data = Object.create(null)
    const transferTokens = Object.create(null)
    const transferExpiryTimers = Object.create(null)
+   const consumedSocketIds = new Set()
    roomCache.set(app, rooms)
    dataCache.set(app, data)
 
    app.addDisconnectingListener((socket, reason) => {
       console.log('onSocketDisconnecting', socket.id, reason)
+      if (consumedSocketIds.delete(socket.id)) return
       // save socket data & rooms in caches
       const alreadySavedData = data[socket.id]
       const alreadySavedRooms = rooms[socket.id]
@@ -48,13 +50,14 @@ export async function reloadPlugin(app, options = {}) {
       console.log('onSocketConnect', socket.id)
       const transferToken = randomUUID()
       socket.data.__cnxTransferToken = transferToken
+      transferTokens[socket.id] = transferToken
       socket.emit('cnx-transfer-token', transferToken)
    
       // when client ask for transfer from fromSocketId to toSocketId
       socket.on('cnx-transfer', async (fromSocketId, toSocketId, claimedToken) => {
          app.log('verbose', `cnx-transfer from ${fromSocketId} to ${toSocketId}`)
          // A socket may only claim its own ID as the destination — prevent session hijacking
-         if (toSocketId !== socket.id || typeof claimedToken !== 'string'
+         if (toSocketId !== socket.id || fromSocketId === socket.id || typeof claimedToken !== 'string'
             || transferTokens[fromSocketId] !== claimedToken) {
             app.log('verbose', `cnx-transfer rejected: toSocketId ${toSocketId} !== socket.id ${socket.id}`)
             socket.emit('cnx-transfer-error', fromSocketId, toSocketId)
@@ -62,8 +65,11 @@ export async function reloadPlugin(app, options = {}) {
          }
          // copy connection room & data from 'fromSocketId' to 'toSocketId'
          const toSocket = io.sockets.sockets.get(toSocketId)
-         // data & rooms of fromSocketId are taken from dataCache and roomCache, since socket no longer exists
-         const fromSocketRooms = rooms[fromSocketId]
+         const fromSocket = io.sockets.sockets.get(fromSocketId)
+         // Usually the old socket has disconnected and its state is cached. During a
+         // fast reload it may still be live, so snapshot it directly instead.
+         const fromSocketRooms = rooms[fromSocketId] ?? fromSocket?.rooms
+         const fromSocketData = data[fromSocketId] ?? fromSocket?.data
          if (toSocket && fromSocketRooms) {
             // copy rooms
             for (const room of fromSocketRooms) {
@@ -72,7 +78,7 @@ export async function reloadPlugin(app, options = {}) {
             }
             // copy data
             toSocket.data = {
-               ...data[fromSocketId],
+               ...fromSocketData,
                ...toSocket.data,
                __cnxTransferToken: transferToken,
             }
@@ -84,6 +90,10 @@ export async function reloadPlugin(app, options = {}) {
             delete transferTokens[fromSocketId]
             clearTimeout(transferExpiryTimers[fromSocketId])
             delete transferExpiryTimers[fromSocketId]
+            if (fromSocket) {
+               consumedSocketIds.add(fromSocketId)
+               fromSocket.disconnect(true)
+            }
             // send acknowlegment to toSocket
             toSocket.emit('cnx-transfer-ack', fromSocketId, toSocketId)
          } else {

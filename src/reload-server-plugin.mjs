@@ -68,9 +68,7 @@ export async function reloadPlugin(app, options = {}) {
             // copy rooms
             for (const room of fromSocketRooms) {
                if (room === fromSocketId) continue // do not include room associated to socket#id
-               const allowed = typeof options.authorizeRoomRestore === 'function'
-                  && await options.authorizeRoomRestore({ app, socket: toSocket, room })
-               if (allowed) toSocket.join(room)
+               toSocket.join(room)
             }
             // copy data
             toSocket.data = {

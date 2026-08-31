@@ -1,16 +1,17 @@
 import { Shape, ShapeStream } from '@electric-sql/client'
-import { firstValueFrom, Observable, Subject, takeUntil } from 'rxjs'
-import { getCurrentScope, onScopeDispose, ref } from 'vue'
+import { Observable } from 'rxjs'
+// import { firstValueFrom, Subject, takeUntil } from 'rxjs'
+// import { getCurrentScope, onScopeDispose } from 'vue'
 
 /**
  * Add Electric-backed reactive models to an Express-X client.
  *
  * Usage:
  *   electricClientPlugin(app)
- *   const todo = app.createElectricModel('todos') // primary key is provided by client
- *   const todo = app.createElectricModel('todos', { idGeneration: 'server' }) // primary key is server-generated
- *   todo.getObservable({ completed: false }).subscribe(...)
- *   const completedTodos = await todo.findMany({ completed: false })
+ *   const todoModel = app.createElectricModel('todos') // primary key is automatically provided by server (auto-increment)
+ *   const todoMilk = await todoModel.create({ label: "Buy milk" })
+ *   todoMilk.update({ completed: true })
+ *   todoModel.getObservable({ completed: false }).subscribe(...) // subscribe to an observable for todos with completed===false
  */
 export function electricClientPlugin(app, options = {}) {
    const shapePath = options.shapePath ?? '/electric/v1/shape'
@@ -23,10 +24,10 @@ export function electricClientPlugin(app, options = {}) {
       const service = app.service(modelName)
       const url = modelOptions.url ?? modelPath(shapePath, modelName)
       const streamOptions = modelOptions.streamOptions ?? {}
-      const idGeneration = modelOptions.idGeneration ?? 'client'
-      if (!['client', 'server'].includes(idGeneration)) {
-         throw new TypeError("idGeneration must be 'client' or 'server'")
-      }
+      // const idGeneration = modelOptions.idGeneration ?? 'client'
+      // if (!['client', 'server'].includes(idGeneration)) {
+      //    throw new TypeError("idGeneration must be 'client' or 'server'")
+      // }
 
       function getObservable(where = {}) {
          // Validate eagerly
@@ -52,24 +53,35 @@ export function electricClientPlugin(app, options = {}) {
          })
       }
 
-      function findMany(where = {}) {
-         const observable = getObservable(where)
-         if (!getCurrentScope()) return firstValueFrom(observable)
+      // function findMany(where = {}) {
+      //    const observable = getObservable(where)
+      //    if (!getCurrentScope()) return firstValueFrom(observable)
 
-         const scopeDisposed = new Subject()
-         onScopeDispose(() => {
-            scopeDisposed.next()
-            scopeDisposed.complete()
-         })
-         return firstValueFrom(observable.pipe(takeUntil(scopeDisposed)))
-      }
+      //    const scopeDisposed = new Subject()
+      //    onScopeDispose(() => {
+      //       scopeDisposed.next()
+      //       scopeDisposed.complete()
+      //    })
+      //    return firstValueFrom(observable.pipe(takeUntil(scopeDisposed)))
+      // }
 
-      async function create(data) {
-         assertPlainObject(data, 'mutation data')
-         if (idGeneration === 'server') return service.create(data)
-         const uid = globalThis.crypto?.randomUUID?.()
-         if (!uid) throw new Error('crypto.randomUUID() is required')
-         return service.create(uid, data)
+      // async function create(data) {
+      //    assertPlainObject(data, 'mutation data')
+      //    if (idGeneration === 'server') return service.create(data)
+      //    const uid = globalThis.crypto?.randomUUID?.()
+      //    if (!uid) throw new Error('crypto.randomUUID() is required')
+      //    return service.create(uid, data)
+      // }
+
+      async function create(uidOrData, data) {
+         const hasUid = data !== undefined
+         const mutationData = hasUid ? data : uidOrData
+         assertPlainObject(mutationData, 'mutation data')
+         if (hasUid) {
+            return service.create(uidOrData, data)
+         } else {
+            return service.create(data)
+         }
       }
 
       async function update(id, data) {
@@ -80,7 +92,7 @@ export function electricClientPlugin(app, options = {}) {
          return service.delete(id)
       }
 
-      return { getObservable, findMany, create, update, remove }
+      return { getObservable, /*findMany,*/ create, update, remove }
    }
 
    return Object.assign(app, { createElectricModel })

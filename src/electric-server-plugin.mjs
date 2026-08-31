@@ -16,9 +16,11 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
    const shapePath = options.shapePath ?? '/electric/v1/shape/:model'
    const fetchImpl = options.fetch ?? globalThis.fetch
    if (typeof fetchImpl !== 'function') throw new TypeError('a fetch implementation is required')
+   const authorizeFunc = options.authorize || (() => true)
+   if (typeof authorizeFunc !== 'function') throw new TypeError('an authorize function is required')
 
    async function authorize(context, modelName, action, args) {
-      const allowed = await options.authorize(context, { modelName, action, args })
+      const allowed = await authorizeFunc(context, { modelName, action, args })
       if (!allowed) {
          const error = new Error(`not authorized to ${action} '${modelName}'`)
          error.code = 'forbidden'
@@ -54,13 +56,13 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
 
          // create(data): the primary key is server-generated
          // create(uid, data): uid (the primary key) is provided by the client
-         create: async function(idOrData, data) {
+         create: async function(uidOrData, data) {
             const hasClientId = data !== undefined
-            const mutationData = hasClientId ? data : idOrData
-            await authorize(this, model.name, 'create', hasClientId ? [idOrData, mutationData] : [mutationData])
+            const mutationData = hasClientId ? data : uidOrData
+            await authorize(this, model.name, 'create', hasClientId ? [uidOrData, mutationData] : [mutationData])
             assertPlainObject(mutationData, 'mutation data')
             const safeData = hasClientId
-               ? { ...mutationData, [model.primaryKey]: idOrData }
+               ? { ...mutationData, [model.primaryKey]: uidOrData }
                : { ...mutationData }
             const entries = Object.entries(safeData).filter(([, value]) => value !== undefined)
             const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))

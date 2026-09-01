@@ -1,6 +1,6 @@
 {
   "name": "@jcbuisson/express-x-plugins",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "Plugins for express-x",
   "type": "module",
   "main": "./src/electric-server-plugin.mjs",

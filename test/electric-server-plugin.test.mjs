@@ -10,7 +10,7 @@ function fixture({ authorize = async () => true, fetch } = {}) {
    const db = {
       async query(sql, values = []) {
          queries.push({ sql, values })
-         return { rows: [{ uid: values.at(-1) ?? 'one', label: 'row' }] }
+         return { rows: [{ id: values.at(-1) ?? 'one', label: 'row' }] }
       },
    }
    const app = {
@@ -25,14 +25,18 @@ test('registers the mutation API', async () => {
    const { services, queries } = fixture()
    const service = services.get('todos')
    assert.deepEqual(Object.keys(service), [
-      'create', 'update', 'delete',
+      'findUnique', 'findMany', 'create', 'update', 'delete',
    ])
 
    const value = await service.create.call({}, 'one', { label: 'new' })
-   assert.equal(value.uid, 'one')
+   assert.equal(value.id, 'one')
 
    await service.create.call({}, 'only-id', {})
-   assert.match(queries[1].sql, /DO UPDATE SET "uid" = EXCLUDED\."uid"/)
+   assert.match(queries[1].sql, /DO UPDATE SET "id" = EXCLUDED\."id"/)
+   assert.equal(queries[1].values[0], 'only-id')
+   assert.deepEqual(fixture().registration.models, [
+      { name: 'todos', table: 'todos', primaryKey: 'id' },
+   ])
    await assert.rejects(service.create.call({}, 'bad', []), /plain object/)
 })
 

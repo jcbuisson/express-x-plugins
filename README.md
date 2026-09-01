@@ -105,7 +105,7 @@ app.configure(electricClientPlugin, {
   shapePath: '/electric/v1/shape',
 })
 
-// Client-generated UUID stored in the default `uid` primary key:
+// Client-generated UUID stored in the default `id` primary key:
 const todo = app.createElectricModel('todos')
 
 // Or, for a database-generated primary key such as SERIAL/IDENTITY:
@@ -121,8 +121,8 @@ const subscription = todo.getObservable({ completed: false }).subscribe(rows => 
 
 // Mutations use the matching Express-X service and are reflected by Electric.
 await todo.create({ title: 'Learn Shapes', completed: false })
-await todo.update(uid, { completed: true })
-await todo.remove(uid)
+await todo.update(id, { completed: true })
+await todo.remove(id)
 
 const created = await numberedTodo.create({ title: 'Assigned by PostgreSQL' })
 console.log(created.id)
@@ -143,7 +143,7 @@ configured table, and Electric source credentials stay server-side.
 
 ### Model configuration
 
-Server models may be strings (table, service name, and default `uid` key) or objects:
+Server models may be strings (table, service name, and default `id` key) or objects:
 
 ```js
 { name: 'todo', table: 'todos', primaryKey: 'id' }

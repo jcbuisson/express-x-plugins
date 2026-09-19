@@ -12,6 +12,8 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
    //    throw new TypeError('electricOfflinePlugin requires an authorize(context, operation) policy')
    // }
    const configuredModels = normalizeModels(models)
+   const sync = options.sync === true
+   if (sync && typeof db.connect !== 'function') throw new TypeError('sync requires a pg Pool with connect()')
    const electricUrl = new URL(options.electricUrl ?? process.env.ELECTRIC_URL ?? 'http://localhost:3000/v1/shape')
    const shapePath = options.shapePath ?? '/electric/v1/shape/:model'
    const fetchImpl = options.fetch ?? globalThis.fetch
@@ -56,14 +58,20 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
 
          // create(data): the primary key is server-generated
          // create(id, data): id (the primary key) is provided by the client
-         create: async function(idOrData, data) {
+         create: async function(idOrData, data, mutation) {
             const hasClientId = data !== undefined
             const mutationData = hasClientId ? data : idOrData
-            await authorize(this, model.name, 'create', hasClientId ? [idOrData, mutationData] : [mutationData])
+            await authorize(this, model.name, 'create', hasClientId
+               ? (sync ? [idOrData, mutationData, mutation] : [idOrData, mutationData])
+               : [mutationData])
             assertPlainObject(mutationData, 'mutation data')
             const safeData = hasClientId
                ? { ...mutationData, [model.primaryKey]: idOrData }
                : { ...mutationData }
+            if (sync) {
+               if (!hasClientId) throw new TypeError('sync mutations require a client-generated id')
+               return syncMutation(db, model, 'create', idOrData, safeData, mutation)
+            }
             const entries = Object.entries(safeData).filter(([, value]) => value !== undefined)
             const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
             const values = entries.map(([, value]) => value)
@@ -91,8 +99,9 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
             })
          },
 
-         update: async function(id, data) {
-            await authorize(this, model.name, 'update', [id, data])
+         update: async function(id, data, mutation) {
+            await authorize(this, model.name, 'update', sync ? [id, data, mutation] : [id, data])
+            if (sync) return syncMutation(db, model, 'update', id, data, mutation)
             const set = buildSet(data, model.primaryKey)
             return withTransaction(db, async client => {
                const result = await client.query(
@@ -103,8 +112,9 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
             })
          },
 
-         delete: async function(id) {
-            await authorize(this, model.name, 'delete', [id])
+         delete: async function(id, mutation) {
+            await authorize(this, model.name, 'delete', sync ? [id, mutation] : [id])
+            if (sync) return syncMutation(db, model, 'delete', id, null, mutation)
             return withTransaction(db, async client => {
                const result = await client.query(
                   `DELETE FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 RETURNING *`, [id],
@@ -139,11 +149,81 @@ export function electricOfflinePlugin(app, db, models, options = {}) {
       }
    })
 
-   return { shapePath, models: configuredModels.map(({ name, table, primaryKey }) => ({ name, table, primaryKey })) }
+   return { shapePath, sync, models: configuredModels.map(({ name, table, primaryKey }) => ({ name, table, primaryKey })) }
+}
+
+/** Run once before accepting sync mutations. Existing rows receive a version. */
+export async function prepareElectricSyncSchema(db, models) {
+   const configuredModels = normalizeModels(models)
+   await db.query('CREATE SEQUENCE IF NOT EXISTS electric_sync_version_seq')
+   await db.query(`CREATE TABLE IF NOT EXISTS electric_mutation_cursor (
+      table_name TEXT NOT NULL, client_id UUID NOT NULL, row_id TEXT NOT NULL,
+      revision BIGINT NOT NULL DEFAULT 0, result JSONB,
+      PRIMARY KEY (table_name, client_id, row_id)
+   )`)
+   for (const model of configuredModels) {
+      await db.query(`ALTER TABLE ${model.quotedTable} ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT nextval('electric_sync_version_seq')`)
+      await db.query(`ALTER TABLE ${model.quotedTable} ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT false`)
+   }
+}
+
+async function syncMutation(db, model, action, id, data, mutation) {
+   if (!mutation || typeof mutation !== 'object') throw new TypeError('sync mutation metadata is required')
+   const { clientId, revision } = mutation
+   if (typeof clientId !== 'string' || !UUID.test(clientId)) throw new TypeError('clientId must be a UUID')
+   if (!/^[1-9][0-9]*$/.test(String(revision)) || BigInt(revision) > 9223372036854775807n) {
+      throw new TypeError('revision must be a positive bigint')
+   }
+   if (typeof id !== 'string' || !UUID.test(id)) throw new TypeError('sync id must be a UUID')
+   if (action !== 'delete') assertPlainObject(data, 'mutation data')
+   if (data && ('version' in data || 'deleted' in data)) throw new TypeError('version and deleted are managed by sync')
+   return withTransaction(db, async tx => {
+      const key = [model.table, clientId, String(id)]
+      await tx.query(`INSERT INTO electric_mutation_cursor (table_name, client_id, row_id)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, key)
+      const { rows } = await tx.query(`SELECT revision, result FROM electric_mutation_cursor
+         WHERE table_name = $1 AND client_id = $2 AND row_id = $3 FOR UPDATE`, key)
+      const cursor = rows[0]
+      if (BigInt(revision) <= BigInt(cursor.revision)) return cursor.result
+      let result
+      if (action === 'create') {
+         const entries = Object.entries({ ...data, [model.primaryKey]: id }).filter(([, value]) => value !== undefined)
+         const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
+         const values = entries.map(([, value]) => value)
+         const parameters = values.map((_, index) => `$${index + 1}`)
+         const inserted = await tx.query(`INSERT INTO ${model.quotedTable} (${columns.join(', ')}) VALUES (${parameters.join(', ')})
+            ON CONFLICT (${model.quotedPrimaryKey}) DO UPDATE SET ${model.quotedPrimaryKey} = EXCLUDED.${model.quotedPrimaryKey}
+            RETURNING *`, values)
+         result = inserted.rows[0]
+      } else if (action === 'update') {
+         const set = buildSet(data, model.primaryKey)
+         const updated = await tx.query(`UPDATE ${model.quotedTable} SET ${set.sql}, version = nextval('electric_sync_version_seq')
+            WHERE ${model.quotedPrimaryKey} = $${set.values.length + 1} AND NOT deleted RETURNING *`, [...set.values, id])
+         result = updated.rows[0] ?? await writeTombstone(tx, model, id)
+      } else {
+         result = await writeTombstone(tx, model, id)
+      }
+      await tx.query(`UPDATE electric_mutation_cursor SET revision = $4, result = $5::jsonb
+         WHERE table_name = $1 AND client_id = $2 AND row_id = $3`, [...key, String(revision), JSON.stringify(result ?? null)])
+      return result
+   })
+}
+
+async function writeTombstone(tx, model, id) {
+   const tombstone = Object.entries(model.tombstoneData)
+   const columns = [model.quotedPrimaryKey, ...tombstone.map(([column]) => quoteIdentifier(column, 'tombstone column')), 'deleted']
+   const values = [id, ...tombstone.map(([, value]) => value)]
+   const parameters = values.map((_, index) => `$${index + 1}`)
+   const clearFields = tombstone.map(([column]) => `${quoteIdentifier(column, 'tombstone column')} = EXCLUDED.${quoteIdentifier(column, 'tombstone column')}`)
+   const { rows } = await tx.query(`INSERT INTO ${model.quotedTable} (${columns.join(', ')}) VALUES (${parameters.join(', ')}, true)
+      ON CONFLICT (${model.quotedPrimaryKey}) DO UPDATE SET ${clearFields.length ? clearFields.join(', ') + ', ' : ''}deleted = true, version = nextval('electric_sync_version_seq')
+      RETURNING *`, values)
+   return rows[0]
 }
 
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
 
 function quoteIdentifier(value, label) {
@@ -166,10 +246,17 @@ function normalizeModels(models) {
       const table = config.table ?? name
       const primaryKey = config.primaryKey ?? 'id'
       quoteIdentifier(name, 'model name')
+      const tombstoneData = config.tombstoneData ?? {}
+      assertPlainObject(tombstoneData, 'tombstoneData')
+      for (const column of Object.keys(tombstoneData)) {
+         quoteIdentifier(column, 'tombstone column')
+         if ([primaryKey, 'version', 'deleted'].includes(column)) throw new TypeError('tombstoneData contains a sync-managed column')
+      }
       return {
          name,
          table,
          primaryKey,
+         tombstoneData,
          quotedTable: quoteIdentifier(table, `table for '${name}'`),
          quotedPrimaryKey: quoteIdentifier(primaryKey, `primary key for '${name}'`),
       }

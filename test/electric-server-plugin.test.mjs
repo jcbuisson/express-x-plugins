@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { electricOfflinePlugin } from '../src/electric-server-plugin.mjs'
+import { electricOfflinePlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
 function fixture({ authorize = async () => true, fetch } = {}) {
    const services = new Map()
@@ -153,4 +153,73 @@ test('rejects unsafe SQL identifiers', () => {
       ),
       /simple SQL identifier/,
    )
+})
+
+test('sync mode commits a versioned write and rejects replayed or stale revisions', async () => {
+   const queries = []
+   let cursor = { revision: '0', result: null }
+   let inserts = 0
+   const client = {
+      async query(sql, values = []) {
+         queries.push({ sql, values })
+         if (sql.includes('SELECT revision, result FROM electric_mutation_cursor')) return { rows: [cursor] }
+         if (sql.includes('INSERT INTO "todos"')) {
+            inserts++
+            return { rows: [{ id: values.at(-1), version: '42', deleted: false }] }
+         }
+         if (sql.includes('UPDATE electric_mutation_cursor')) cursor = { revision: values[3], result: JSON.parse(values[4]) }
+         return { rows: [] }
+      },
+      release() {},
+   }
+   const db = { query: client.query.bind(client), async connect() { return client } }
+   const services = new Map()
+   electricOfflinePlugin({ createService(name, methods) { services.set(name, methods) }, get() {} }, db,
+      [{ name: 'todos', tombstoneData: { title: '' } }], { sync: true })
+   const service = services.get('todos')
+   const id = '64d76168-775f-481e-8974-18d31d835d9e'
+   const clientId = '5e199e1c-23a4-473e-9989-14d4a1fb857e'
+   const metadata = { clientId, revision: '2' }
+
+   const result = await service.create.call({}, id, { title: 'first' }, metadata)
+   assert.equal(result.version, '42')
+   assert.equal((await service.create.call({}, id, { title: 'first' }, metadata)).version, '42')
+   assert.equal((await service.create.call({}, id, { title: 'stale' }, { clientId, revision: '1' })).version, '42')
+   assert.equal(inserts, 1)
+   assert.equal(queries.filter(({ sql }) => sql === 'COMMIT').length, 3)
+   await assert.rejects(service.create.call({}, id, { title: 'bad' }), /metadata is required/)
+})
+
+test('sync schema prepares version and tombstone columns', async () => {
+   const queries = []
+   await prepareElectricSyncSchema({ query: async sql => { queries.push(sql) } }, ['todos'])
+   assert.equal(queries.length, 4)
+   assert.match(queries[2], /ADD COLUMN IF NOT EXISTS version BIGINT/)
+   assert.match(queries[3], /ADD COLUMN IF NOT EXISTS deleted BOOLEAN/)
+})
+
+test('sync delete writes a versioned tombstone and clears configured fields', async () => {
+   const queries = []
+   const id = '64d76168-775f-481e-8974-18d31d835d9e'
+   const client = {
+      async query(sql, values = []) {
+         queries.push({ sql, values })
+         if (sql.includes('SELECT revision, result FROM electric_mutation_cursor')) return { rows: [{ revision: '0', result: null }] }
+         if (sql.includes('INSERT INTO "todos"')) return { rows: [{ id, title: '', deleted: true, version: '7' }] }
+         return { rows: [] }
+      },
+      release() {},
+   }
+   const db = { query: client.query.bind(client), async connect() { return client } }
+   const services = new Map()
+   electricOfflinePlugin({ createService(name, methods) { services.set(name, methods) }, get() {} }, db,
+      [{ name: 'todos', tombstoneData: { title: '' } }], { sync: true })
+   const result = await services.get('todos').delete.call({}, id, {
+      clientId: '5e199e1c-23a4-473e-9989-14d4a1fb857e', revision: '1',
+   })
+   assert.equal(result.deleted, true)
+   const tombstone = queries.find(({ sql }) => sql.includes('INSERT INTO "todos"'))
+   assert.match(tombstone.sql, /"title" = EXCLUDED\."title"/)
+   assert.match(tombstone.sql, /version = nextval/)
+   assert.deepEqual(tombstone.values, [id, ''])
 })

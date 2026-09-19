@@ -44,8 +44,8 @@ import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
 
 ## Local-first Postgres plugin
 
-The smallest useful ElectricSQL integration for Express-X. Express-X handles authorized PostgreSQL mutations;
-Electric's Shape API streams those changes to clients: Electric is the sync engine.
+Express-X handles authorized PostgreSQL mutations; Electric streams committed rows to clients.
+For durable offline writes, use sync mode with a shared PGlite database.
 
 ### Server
 
@@ -56,15 +56,15 @@ npm install pg
 ```js
 import { Pool } from 'pg'
 import { expressX } from '@jcbuisson/express-x/server'
-import { electricOfflinePlugin } from '@jcbuisson/express-x-plugins/electric-server'
+import { electricOfflinePlugin, prepareElectricSyncSchema } from '@jcbuisson/express-x-plugins/electric-server'
 
 const app = expressX()
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
 
 app.configure(electricOfflinePlugin, db, [
-  'todos',
-  { name: 'projects', table: 'projects', primaryKey: 'uid' },
+  { name: 'todos', tombstoneData: { title: '' } },
 ], {
+  sync: true,
   electricUrl: process.env.ELECTRIC_URL, // ElectricSQL sync service, e.g. http://localhost:3000/v1/shape
   sourceId: process.env.ELECTRIC_SOURCE_ID,
   sourceSecret: process.env.ELECTRIC_SOURCE_SECRET,
@@ -73,9 +73,12 @@ app.configure(electricOfflinePlugin, db, [
     return Boolean(context.request?.user || context.socket?.data?.user)
   },
 })
+
+// Run this during startup, before serving sync mutations:
+await prepareElectricSyncSchema(db, [{ name: 'todos' }])
 ```
 
-This registers one Express-X service per model with the familiar API:
+This registers one Express-X service per model. In direct mode, it has the familiar API:
 
 - `findUnique(where)`
 - `findMany(where, queryOptions)`
@@ -88,7 +91,22 @@ The client model provides synchronized reads through `findMany(where)` and
 `getObservable(where)`. The service also exposes direct one-shot server reads
 when synchronization is not required.
 
-Mutation methods return the created, updated, or deleted row directly.
+In sync mode, create requires a client-generated UUID and every mutation requires
+`{ clientId, revision }` as its last argument. The returned row includes `version`.
+The server records the latest revision per client and row in the same transaction
+as the write. Retries replay the saved result; older requests cannot overwrite a
+newer edit from that client. Deletes write versioned tombstones instead of removing
+rows. Configure `tombstoneData` for required columns without defaults, such as a
+required title. Keep the cursor table and tombstones to protect delayed retries and
+offline clients. This does not resolve concurrent edits by different clients.
+
+Import `prepareElectricSyncSchema` alongside `electricOfflinePlugin`. It adds
+`version` and `deleted` columns and creates the shared version sequence and cursor
+table. The primary key must be UUID in sync mode. All writes to synced tables must
+advance `version`; hard deletes bypass tombstone confirmation.
+
+Without `sync: true`, the existing direct service methods remain available and
+return created, updated, or deleted rows directly.
 
 ### Client
 
@@ -97,6 +115,8 @@ Install the optional client dependencies in the browser application:
 ```sh
 npm install @electric-sql/client rxjs
 ```
+
+For a server configured without `sync: true`, the direct client API is:
 
 ```js
 import { electricClientPlugin } from '@jcbuisson/express-x-plugins/electric-client'
@@ -119,7 +139,7 @@ const subscription = todo.getObservable({ completed: false }).subscribe(rows => 
   console.log(rows)
 })
 
-// Mutations use the matching Express-X service and are reflected by Electric.
+// Direct mutations use the matching Express-X service and are reflected by Electric.
 await todo.create({ title: 'Learn Shapes', completed: false })
 await todo.update(id, { completed: true })
 await todo.remove(id)
@@ -129,6 +149,32 @@ console.log(created.id)
 
 subscription.unsubscribe()
 ```
+
+For offline writes, install `@electric-sql/pglite`, pass a shared PGlite database
+as `localDb`, and use the sync
+server mode above. `PGliteWorker` with an IndexedDB data directory is recommended
+for multiple tabs. Only one worker should use `ownsSync: true`; use a shared
+`BroadcastChannel` so other tabs receive change notifications.
+
+```js
+const todo = app.createElectricModel('todos', {
+  localDb: db, // PGliteWorker with a persistent idb:// data directory
+  channel: new BroadcastChannel('todos-sync'),
+})
+await todo.prepare() // creates local rows, mutation queue, client ID, revision sequence
+todo.start()         // starts Electric and mutation retries
+await todo.create({ title: 'Works offline' })
+await todo.update(id, { title: 'Still offline' })
+await todo.remove(id)
+const rows = await todo.findMany()
+const status = await todo.getStatus() // pending, failed, online
+```
+
+Local edits and queue entries commit together. Successful service responses leave
+queue entries in place until Electric sends the acknowledged `version` or newer.
+Rows with `deleted = true` confirm deletes but stay hidden locally. Network errors
+remain queued for retry; permanent HTTP 4xx errors are marked failed. The local
+database, including its identity and revision sequence, must remain persistent.
 
 `findMany(where)` resolves with all matching rows from the first synchronized Shape emission.
 

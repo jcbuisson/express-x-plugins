@@ -56,12 +56,12 @@ npm install pg
 ```js
 import { Pool } from 'pg'
 import { expressX } from '@jcbuisson/express-x/server'
-import { electricOfflinePlugin, prepareElectricSyncSchema } from '@jcbuisson/express-x-plugins/electric-server'
+import { electricServerPlugin, prepareElectricSyncSchema } from '@jcbuisson/express-x-plugins/electric-server'
 
 const app = expressX()
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
 
-app.configure(electricOfflinePlugin, db, [
+app.configure(electricServerPlugin, db, [
   { name: 'todos', tombstoneData: { title: '' } },
 ], {
   sync: true,
@@ -100,7 +100,7 @@ rows. Configure `tombstoneData` for required columns without defaults, such as a
 required title. Keep the cursor table and tombstones to protect delayed retries and
 offline clients. This does not resolve concurrent edits by different clients.
 
-Import `prepareElectricSyncSchema` alongside `electricOfflinePlugin`. It adds
+Import `prepareElectricSyncSchema` alongside `electricServerPlugin`. It adds
 `version` and `deleted` columns and creates the shared version sequence and cursor
 table. The primary key must be UUID in sync mode. All writes to synced tables must
 advance `version`; hard deletes bypass tombstone confirmation.

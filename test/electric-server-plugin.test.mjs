@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { electricOfflinePlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
+import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
 function fixture({ authorize = async () => true, fetch } = {}) {
    const services = new Map()
@@ -17,7 +17,7 @@ function fixture({ authorize = async () => true, fetch } = {}) {
       createService(name, methods) { services.set(name, methods) },
       get(path, handler) { routes.set(path, handler) },
    }
-   const registration = electricOfflinePlugin(app, db, ['todos'], { authorize, fetch: fetch ?? globalThis.fetch })
+   const registration = electricServerPlugin(app, db, ['todos'], { authorize, fetch: fetch ?? globalThis.fetch })
    return { app, db, services, routes, queries, registration }
 }
 
@@ -65,7 +65,7 @@ test('protects the configured primary key during updates', async () => {
       createService(name, methods) { services.set(name, methods) },
       get() {},
    }
-   electricOfflinePlugin(app, db, [{ name: 'people', primaryKey: 'id' }], {
+   electricServerPlugin(app, db, [{ name: 'people', primaryKey: 'id' }], {
       authorize: async () => true,
    })
 
@@ -115,7 +115,7 @@ test('shape proxy pins the configured table and keeps credentials server-side', 
       createService(name, methods) { services.set(name, methods) },
       get(path, handler) { routes.set(path, handler) },
    }
-   electricOfflinePlugin(app, db, [{ name: 'todo', table: 'todos' }], {
+   electricServerPlugin(app, db, [{ name: 'todo', table: 'todos' }], {
       authorize: async () => true,
       electricUrl: 'https://electric.example/v1/shape',
       sourceId: 'source',
@@ -145,7 +145,7 @@ test('shape proxy pins the configured table and keeps credentials server-side', 
 
 test('rejects unsafe SQL identifiers', () => {
    assert.throws(
-      () => electricOfflinePlugin(
+      () => electricServerPlugin(
          { createService() {}, get() {} },
          { query() {} },
          ['todos; DROP TABLE users'],
@@ -174,7 +174,7 @@ test('sync mode commits a versioned write and rejects replayed or stale revision
    }
    const db = { query: client.query.bind(client), async connect() { return client } }
    const services = new Map()
-   electricOfflinePlugin({ createService(name, methods) { services.set(name, methods) }, get() {} }, db,
+   electricServerPlugin({ createService(name, methods) { services.set(name, methods) }, get() {} }, db,
       [{ name: 'todos', tombstoneData: { title: '' } }], { sync: true })
    const service = services.get('todos')
    const id = '64d76168-775f-481e-8974-18d31d835d9e'
@@ -212,7 +212,7 @@ test('sync delete writes a versioned tombstone and clears configured fields', as
    }
    const db = { query: client.query.bind(client), async connect() { return client } }
    const services = new Map()
-   electricOfflinePlugin({ createService(name, methods) { services.set(name, methods) }, get() {} }, db,
+   electricServerPlugin({ createService(name, methods) { services.set(name, methods) }, get() {} }, db,
       [{ name: 'todos', tombstoneData: { title: '' } }], { sync: true })
    const result = await services.get('todos').delete.call({}, id, {
       clientId: '5e199e1c-23a4-473e-9989-14d4a1fb857e', revision: '1',

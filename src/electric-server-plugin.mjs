@@ -6,10 +6,10 @@
  * @param {(string|{name:string,table?:string,primaryKey?:string})[]} models
  * @param {object} options
  */
-export function electricOfflinePlugin(app, db, models, options = {}) {
+export function electricServerPlugin(app, db, models, options = {}) {
    if (!db || typeof db.query !== 'function') throw new TypeError('db must expose query(sql, values)')
    // if (typeof options.authorize !== 'function') {
-   //    throw new TypeError('electricOfflinePlugin requires an authorize(context, operation) policy')
+   //    throw new TypeError('electricServerPlugin requires an authorize(context, operation) policy')
    // }
    const configuredModels = normalizeModels(models)
    const sync = options.sync === true

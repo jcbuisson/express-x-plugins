@@ -2,6 +2,7 @@ import { Shape, ShapeStream } from '@electric-sql/client'
 import { Observable, firstValueFrom, Subject, takeUntil } from 'rxjs'
 import { getCurrentScope, onScopeDispose } from 'vue'
 import { createOfflineElectricModel } from './electric-offline-model.mjs'
+import { createManagedSync } from './electric-managed-sync.mjs'
 
 /**
  * Add Electric-backed reactive models to an Express-X client.
@@ -19,8 +20,21 @@ export function electricClientPlugin(app, options = {}) {
    const ShapeClass = options.Shape ?? DisposableShape
    const ObservableClass = options.Observable ?? Observable
 
+   const managed = options.sync === true
+      ? createManagedSync(options, createDirectModel)
+      : null
+
    function createElectricModel(modelName, modelOptions = {}) {
       quoteIdentifier(modelName)
+      quoteIdentifier(modelOptions.primaryKey ?? 'id')
+      if (managed) {
+         if (modelOptions.idGeneration === 'server') throw new TypeError('sync models require client-generated UUIDs')
+         return managed.model(modelName, modelOptions)
+      }
+      return createDirectModel(modelName, modelOptions)
+   }
+
+   function createDirectModel(modelName, modelOptions) {
       const service = app.service(modelName)
       const url = modelOptions.url ?? modelPath(shapePath, modelName)
       if (modelOptions.localDb) return createOfflineElectricModel({
@@ -31,6 +45,8 @@ export function electricClientPlugin(app, options = {}) {
          channel: modelOptions.channel,
          network: modelOptions.network ?? globalThis.navigator,
          retryMs: modelOptions.retryMs ?? 5000,
+         streamOptions: modelOptions.streamOptions,
+         onError: modelOptions.onError ?? options.onError,
       })
       const streamOptions = modelOptions.streamOptions ?? {}
       const idGeneration = modelOptions.idGeneration ?? 'client'
@@ -53,7 +69,7 @@ export function electricClientPlugin(app, options = {}) {
             let previous
             const unsubscribe = shape.subscribe(({ rows }) => {
                const current = [...rows]
-               const serialized = JSON.stringify(current)
+               const serialized = JSON.stringify(current, (_key, value) => typeof value === 'bigint' ? String(value) : value)
                if (serialized === previous) return
                previous = serialized
                subscriber.next(current)
@@ -88,7 +104,7 @@ export function electricClientPlugin(app, options = {}) {
          if (idGeneration === 'server') return service.create(mutationData)
          const uid = globalThis.crypto?.randomUUID?.()
          if (!uid) throw new Error('crypto.randomUUID() is required')
-         return service.create(uid, data)
+         return service.create(uid, mutationData)
       }
 
       async function update(id, data) {
@@ -102,7 +118,7 @@ export function electricClientPlugin(app, options = {}) {
       return { getObservable, findMany, findUnique, create, update, remove }
    }
 
-   return Object.assign(app, { createElectricModel })
+   return Object.assign(app, { createElectricModel, ...(managed ? { disposeElectricSync: managed.dispose } : {}) })
 }
 
 

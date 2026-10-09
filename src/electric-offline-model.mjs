@@ -1,7 +1,7 @@
 import { Observable } from 'rxjs'
 
 /** Offline model backed by a shared PGlite database (normally PGliteWorker). */
-export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs }) {
+export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs, streamOptions = {}, onError }) {
    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(primaryKey)) throw new TypeError('primaryKey must be a simple SQL identifier')
    let snapshot = null
    let operation = Promise.resolve()
@@ -10,10 +10,22 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    let connected = false
    let timer
    let stream
+   let streamGeneration = 0
+   let lastError = null
+   const pendingBackground = new Set()
+   function report(error) {
+      lastError = error?.message ?? String(error)
+      try { onError?.(error, { modelName }) } catch (callbackError) { console.error(callbackError) }
+      notify()
+   }
+   function background(promise) {
+      pendingBackground.add(promise)
+      void promise.catch(report).finally(() => pendingBackground.delete(promise))
+   }
    const listeners = new Set()
 
    async function prepare() {
-      await db.exec(`
+      await retryLeader(() => db.exec(`
          CREATE SEQUENCE IF NOT EXISTS electric_mutation_revision_seq;
          CREATE TABLE IF NOT EXISTS electric_sync_client (
             singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
@@ -33,11 +45,11 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             failure_reason TEXT,
             PRIMARY KEY (model_name, row_id)
          );
-      `)
+      `))
    }
 
    function notify() {
-      channel?.postMessage({ modelName })
+      channel?.postMessage({ modelName, ...(ownsSync ? { online: connected && network?.onLine !== false } : {}) })
       for (const listener of listeners) queueMicrotask(() => { try { listener() } catch (error) { console.error(error) } })
    }
 
@@ -47,7 +59,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    async function findMany(where = {}) {
-      const { rows } = await db.query('SELECT data FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', [modelName])
+      const { rows } = await retryLeader(() => db.query('SELECT data FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', [modelName]))
       return rows.map(row => row.data).filter(row => matchesWhere(row, where))
    }
 
@@ -73,11 +85,11 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       assertId(id)
       const row = { ...data, [primaryKey]: id }
       await db.transaction(async tx => {
-         await tx.query('INSERT INTO electric_local_rows (model_name, row_id, data) VALUES ($1, $2, $3::jsonb)', [modelName, String(id), JSON.stringify(row)])
+         await tx.query('INSERT INTO electric_local_rows (model_name, row_id, data) VALUES ($1, $2, $3::jsonb)', [modelName, String(id), json(row)])
          await queueMutation(tx, id, 'create', row)
       })
       notify()
-      if (started) void flushQueue()
+      if (started) background(flushQueue())
       return row
    }
 
@@ -90,14 +102,14 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          const current = await tx.query('SELECT data FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
          if (!current.rows[0]) throw new Error('row not found')
          row = { ...current.rows[0].data, ...data }
-         await tx.query('UPDATE electric_local_rows SET data = $3::jsonb WHERE model_name = $1 AND row_id = $2', [modelName, String(id), JSON.stringify(row)])
+         await tx.query('UPDATE electric_local_rows SET data = $3::jsonb WHERE model_name = $1 AND row_id = $2', [modelName, String(id), json(row)])
          const queued = await tx.query('SELECT action, acknowledged_version FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
          if (queued.rows[0]?.action === 'delete') throw new Error('row has a pending delete')
          const action = queued.rows[0]?.action === 'create' && queued.rows[0].acknowledged_version == null ? 'create' : 'update'
          await queueMutation(tx, id, action, row)
       })
       notify()
-      if (started) void flushQueue()
+      if (started) background(flushQueue())
       return row
    }
 
@@ -108,7 +120,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          await queueMutation(tx, id, 'delete', null)
       })
       notify()
-      if (started) void flushQueue()
+      if (started) background(flushQueue())
    }
 
    async function queueMutation(tx, id, action, data) {
@@ -118,7 +130,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             action = EXCLUDED.action, data = EXCLUDED.data,
             revision = nextval('electric_mutation_revision_seq'),
             acknowledged_version = NULL, status = 'pending', failure_reason = NULL`,
-      [modelName, String(id), action, data == null ? null : JSON.stringify(data)])
+      [modelName, String(id), action, data == null ? null : json(data)])
    }
 
    function ordered(task) {
@@ -145,7 +157,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    async function reconcileSnapshot(rows) {
-      await db.transaction(async tx => {
+      await retryLeader(() => db.transaction(async tx => {
          for (const row of rows) {
             const id = String(row[primaryKey])
             if (row.version != null) {
@@ -158,7 +170,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
                SELECT $1, $2, $3::jsonb WHERE NOT EXISTS
                   (SELECT 1 FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2)
                ON CONFLICT (model_name, row_id) DO UPDATE SET data = EXCLUDED.data`,
-            [modelName, id, JSON.stringify(row)])
+            [modelName, id, json(row)])
          }
          const activeIds = rows.filter(row => !row.deleted).map(row => String(row[primaryKey]))
          await tx.query(`DELETE FROM electric_local_rows AS local
@@ -166,7 +178,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
               AND NOT EXISTS (SELECT 1 FROM electric_mutation_queue AS pending
                  WHERE pending.model_name = local.model_name AND pending.row_id = local.row_id)`,
          [modelName, activeIds])
-      })
+      }))
       notify()
    }
 
@@ -174,15 +186,17 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       if (!ownsSync || flushing || network?.onLine === false) return
       flushing = true
       try {
-         while (true) {
-            const { rows } = await db.query(`SELECT * FROM electric_mutation_queue
+         while (ownsSync) {
+            const { rows } = await retryLeader(() => db.query(`SELECT * FROM electric_mutation_queue
                WHERE model_name = $1 AND status = 'pending' AND acknowledged_version IS NULL
-               ORDER BY revision LIMIT 1`, [modelName])
+               ORDER BY revision LIMIT 1`, [modelName]))
             const mutation = rows[0]
             if (!mutation) break
             try {
                await sendMutation(mutation)
+               lastError = null
             } catch (error) {
+               report(error)
                if (!isPermanent(error)) break
                await db.query(`UPDATE electric_mutation_queue SET status = 'failed', failure_reason = $3
                   WHERE model_name = $1 AND row_id = $2 AND revision = $4`,
@@ -196,7 +210,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    async function sendMutation(mutation) {
-      const client = await db.query('SELECT id FROM electric_sync_client WHERE singleton = true')
+      const client = await retryLeader(() => db.query('SELECT id FROM electric_sync_client WHERE singleton = true'))
       const metadata = { clientId: client.rows[0].id, revision: String(mutation.revision) }
       const { row_id: id, data, action } = mutation
       const result = action === 'create'
@@ -205,7 +219,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             ? await service.update(id, withoutKey(data), metadata)
             : await service.delete(id, metadata)
       if (result?.version == null) throw new Error('sync mutation did not return a version')
-      await db.transaction(async tx => {
+      await retryLeader(() => db.transaction(async tx => {
          const current = await tx.query('SELECT action, revision, data FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2', [modelName, id])
          const queued = current.rows[0]
          if (!queued) return
@@ -217,7 +231,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             await tx.query(`UPDATE electric_mutation_queue SET action = 'update',
                revision = nextval('electric_mutation_revision_seq') WHERE model_name = $1 AND row_id = $2`, [modelName, id])
          }
-      })
+      }))
       await reconcile()
       notify()
    }
@@ -235,45 +249,64 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       started = true
       channel?.addEventListener('message', sharedChange)
       globalThis.addEventListener?.('online', online)
-      if (!ownsSync) return
-      stream = new ShapeStreamClass({ url })
+      if (!ownsSync) { channel?.postMessage({ modelName, requestStatus: true }); return }
+      const generation = ++streamGeneration
+      stream = new ShapeStreamClass({ ...streamOptions, url })
       stream.subscribe(messages => {
-         if (messages.some(message => message.headers?.control === 'must-refetch')) void resetSnapshot()
+         if (generation !== streamGeneration) return
+         if (messages.some(message => message.headers?.control === 'must-refetch')) background(resetSnapshot())
          connected = stream.isConnected?.() ?? true
          notify()
-      }, () => { connected = false; notify() })
+      }, error => { if (generation !== streamGeneration) return; connected = false; report(error) })
       const shape = new ShapeClass(stream)
-      shape.subscribe(({ rows }) => { connected = true; void applySnapshot([...rows]) })
-      timer = setInterval(() => { void flushQueue() }, retryMs)
-      void flushQueue()
+      shape.subscribe(({ rows }) => { if (generation !== streamGeneration) return; connected = true; background(applySnapshot([...rows])) })
+      timer = setInterval(() => { background(flushQueue()) }, retryMs)
+      background(flushQueue())
+   }
+
+   function setSyncOwner(value) {
+      if (ownsSync === value) return
+      const restart = started
+      stop()
+      ownsSync = value
+      if (restart) start()
+   }
+
+   async function waitForIdle() {
+      while (pendingBackground.size) await Promise.allSettled([...pendingBackground])
+      await operation
    }
 
    function stop() {
       if (!started) return
       started = false
+      ++streamGeneration
       clearInterval(timer)
       stream?.unsubscribeAll()
       channel?.removeEventListener('message', sharedChange)
       globalThis.removeEventListener?.('online', online)
       connected = false
+      notify()
    }
 
-   function online() { void flushQueue() }
+   function online() { background(flushQueue()) }
    function sharedChange(event) {
       if (event.data?.modelName !== modelName) return
+      if (!ownsSync && typeof event.data.online === 'boolean') connected = event.data.online
+      if (ownsSync && event.data.requestStatus) notify()
       for (const listener of listeners) queueMicrotask(() => { try { listener() } catch (error) { console.error(error) } })
-      if (ownsSync) void flushQueue()
+      if (ownsSync) background(flushQueue())
    }
 
    async function getStatus() {
-      const { rows } = await db.query(`SELECT
+      const { rows } = await retryLeader(() => db.query(`SELECT
          count(*) FILTER (WHERE status = 'pending')::int AS pending,
          count(*) FILTER (WHERE status = 'failed')::int AS failed
-         FROM electric_mutation_queue WHERE model_name = $1`, [modelName])
-      return { ...rows[0], online: network?.onLine !== false && connected }
+         FROM electric_mutation_queue WHERE model_name = $1`, [modelName]))
+      return { ...rows[0], online: network?.onLine !== false && connected, ...(lastError ? { error: lastError } : {}) }
    }
 
-   return { prepare, start, stop, subscribe, findMany, findUnique, getObservable,
+   return { prepare, start, stop, setSyncOwner, waitForIdle, subscribe, findMany, findUnique, getObservable,
       create, update, remove, flushQueue, getStatus }
 }
 
@@ -308,4 +341,20 @@ function isPermanent(error) {
    const status = error?.status ?? error?.response?.status
    return error?.code === 'forbidden' || error instanceof TypeError ||
       status >= 400 && status < 500 && ![408, 425, 429].includes(status)
+}
+
+function json(value) {
+   return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? String(item) : item)
+}
+
+// Snapshots and reads are safe to repeat if PGlite's worker changes mid-request.
+// Foreground local mutation transactions may have committed; callers see their error.
+async function retryLeader(action) {
+   for (let attempt = 0; ; attempt++) {
+      try { return await action() } catch (error) {
+         if (!(error?.name === 'LeaderChangedError' || error?.constructor?.name === 'LeaderChangedError' ||
+            error?.message === 'Leader changed, pending operation in indeterminate state') || attempt >= 7) throw error
+         await new Promise(resolve => setTimeout(resolve, Math.min(25 * 2 ** attempt, 250)))
+      }
+   }
 }

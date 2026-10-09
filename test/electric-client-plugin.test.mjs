@@ -142,6 +142,7 @@ test('model mutations retain the simple Express-X API', async () => {
    await todo.update(created.uid, { completed: true })
    await todo.remove(created.uid)
    assert.deepEqual(calls.map(call => call[0]), ['create', 'update', 'remove'])
+   assert.deepEqual(calls[0][2], { title: 'Test' })
 })
 
 test('model creation supports server-generated IDs', async () => {

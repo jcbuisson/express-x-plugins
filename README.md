@@ -150,6 +150,95 @@ console.log(created.id)
 subscription.unsubscribe()
 ```
 
+### Managed browser sync
+
+With a server configured with `sync: true`, the client plugin can own the shared
+PGlite database and multi-tab synchronization:
+
+```sh
+npm install @electric-sql/pglite @electric-sql/client rxjs vue
+```
+
+```js
+app.configure(electricClientPlugin, {
+  sync: true,
+  databaseName: 'selommes', // persistent IndexedDB name; unique to this app/backend
+  shapePath: '/electric/v1/shape',
+  onError: (error, { modelName }) => console.error(modelName, error),
+})
+
+const ranges = app.createElectricModel('range', { primaryKey: 'uid' })
+const subscription = ranges.getObservable().subscribe(rows => console.log(rows))
+await ranges.create({ label: 'Works offline' })
+await ranges.update(uid, { label: 'Edited offline' })
+await ranges.remove(uid)
+console.log(await ranges.getStatus()) // pending, failed, online, error
+
+// During app teardown (for example, HMR disposal):
+subscription.unsubscribe()
+await app.disposeElectricSync()
+```
+
+Models prepare and start automatically; operations wait for schema readiness.
+Repeated calls for the same model reuse its instance. `findMany` and `findUnique`
+read the local cache immediately after preparation, which can be empty before
+Electric's first snapshot. Use `app.service('user').findMany({ deleted: false, ...filter })`
+when an online authentication flow requires an authoritative server read.
+
+Each plugin instance shares one persistent PGliteWorker. PGlite coordinates its
+database worker across tabs. A separate Web Lock per database/model elects one
+tab to run the Electric stream and mutation queue. Follower writes notify the
+owner through BroadcastChannel. When the owner closes or stops, a waiting tab
+takes over. Stream ownership does not depend on PGlite's leader event timing.
+BIGINT values in cached rows are stored as lossless decimal strings. Snapshot
+reconciliation and reads retry transient database leader changes. An indeterminate
+foreground local mutation is reported instead of blindly repeated.
+
+`model.stop()` stops synchronization and releases ownership without deleting local
+rows or queued edits; `await model.start()` resumes it. `await model.dispose()`
+also closes its channel. `await app.disposeElectricSync()` disposes all managed
+models and closes the plugin-owned database. A supplied `localDb` remains owned
+by the caller. Background errors appear in `getStatus()` and invoke `onError`;
+initialization failures reject reads/writes and error observable subscriptions.
+Worker startup times out after 30 seconds (`initTimeoutMs` can override this).
+
+Managed sync requires HTTPS or localhost, Web Locks, BroadcastChannel, workers,
+and IndexedDB. Configure Vite to keep the plugin and PGlite worker asset URLs
+intact during development and emit workers as ES modules:
+
+```js
+export default defineConfig({
+  optimizeDeps: {
+    exclude: ['@jcbuisson/express-x-plugins', '@electric-sql/pglite'],
+  },
+  worker: { format: 'es' },
+})
+```
+
+For other bundlers, provide `workerFactory` if their worker discovery requires
+an application-owned entry point:
+
+```js
+// electric.worker.js
+import '@jcbuisson/express-x-plugins/electric-worker'
+
+// Client configuration:
+app.configure(electricClientPlugin, {
+  sync: true,
+  databaseName: 'selommes',
+  workerFactory: () => new Worker(new URL('./electric.worker.js', import.meta.url), {
+    type: 'module',
+  }),
+})
+```
+
+PWA applications should cache the emitted PGlite `.wasm` and `.data` assets to
+initialize after an offline reload. The WASM asset is about 10 MB; increase the
+precache file-size limit accordingly. Apps that already provide a shared database
+can pass plugin-level `localDb` to retain automatic ownership management.
+
+### Explicit offline models
+
 For offline writes, install `@electric-sql/pglite`, pass a shared PGlite database
 as `localDb`, and use the sync
 server mode above. `PGliteWorker` with an IndexedDB data directory is recommended

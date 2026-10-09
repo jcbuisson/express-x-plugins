@@ -210,7 +210,11 @@ async function syncMutation(db, model, action, id, data, mutation) {
 }
 
 async function writeTombstone(tx, model, id) {
-   const tombstone = Object.entries(model.tombstoneData)
+   const data = typeof model.tombstoneData === 'function'
+      ? await model.tombstoneData({ id })
+      : model.tombstoneData
+   validateTombstoneData(data, model.primaryKey)
+   const tombstone = Object.entries(data)
    const columns = [model.quotedPrimaryKey, ...tombstone.map(([column]) => quoteIdentifier(column, 'tombstone column')), 'deleted']
    const values = [id, ...tombstone.map(([, value]) => value)]
    const parameters = values.map((_, index) => `$${index + 1}`)
@@ -247,11 +251,7 @@ function normalizeModels(models) {
       const primaryKey = config.primaryKey ?? 'id'
       quoteIdentifier(name, 'model name')
       const tombstoneData = config.tombstoneData ?? {}
-      assertPlainObject(tombstoneData, 'tombstoneData')
-      for (const column of Object.keys(tombstoneData)) {
-         quoteIdentifier(column, 'tombstone column')
-         if ([primaryKey, 'version', 'deleted'].includes(column)) throw new TypeError('tombstoneData contains a sync-managed column')
-      }
+      if (typeof tombstoneData !== 'function') validateTombstoneData(tombstoneData, primaryKey)
       return {
          name,
          table,
@@ -261,6 +261,14 @@ function normalizeModels(models) {
          quotedPrimaryKey: quoteIdentifier(primaryKey, `primary key for '${name}'`),
       }
    })
+}
+
+function validateTombstoneData(data, primaryKey) {
+   assertPlainObject(data, 'tombstoneData')
+   for (const column of Object.keys(data)) {
+      quoteIdentifier(column, 'tombstone column')
+      if ([primaryKey, 'version', 'deleted'].includes(column)) throw new TypeError('tombstoneData contains a sync-managed column')
+   }
 }
 
 function assertPlainObject(value, label) {

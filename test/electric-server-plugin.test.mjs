@@ -223,3 +223,81 @@ test('sync delete writes a versioned tombstone and clears configured fields', as
    assert.match(tombstone.sql, /version = nextval/)
    assert.deepEqual(tombstone.values, [id, ''])
 })
+
+
+test('sync tombstone factories generate per-row values and skip replayed revisions', async () => {
+   const queries = []
+   const cursors = new Map()
+   const calls = []
+   const client = {
+      async query(sql, values = []) {
+         queries.push({ sql, values })
+         if (sql.includes('SELECT revision, result FROM electric_mutation_cursor')) {
+            return { rows: [cursors.get(values[2]) ?? { revision: '0', result: null }] }
+         }
+         if (sql.startsWith('UPDATE "users"')) return { rows: [] }
+         if (sql.includes('INSERT INTO "users"')) {
+            return { rows: [{ uid: values[0], email: values[1], deleted: true, version: '7' }] }
+         }
+         if (sql.includes('UPDATE electric_mutation_cursor')) {
+            cursors.set(values[2], { revision: values[3], result: JSON.parse(values[4]) })
+         }
+         return { rows: [] }
+      },
+      release() {},
+   }
+   const db = { query: client.query.bind(client), async connect() { return client } }
+   const services = new Map()
+   const app = { createService(name, methods) { services.set(name, methods) }, get() {} }
+   electricServerPlugin(app, db, [{
+      name: 'users', primaryKey: 'uid',
+      tombstoneData: async ({ id }) => {
+         calls.push(id)
+         return { email: `deleted-${id}@tombstone.invalid` }
+      },
+   }], { sync: true })
+   const service = services.get('users')
+   const first = '64d76168-775f-481e-8974-18d31d835d9e'
+   const second = '64d76168-775f-481e-8974-18d31d835d9f'
+   const metadata = { clientId: '5e199e1c-23a4-473e-9989-14d4a1fb857e', revision: '2' }
+   const result = await service.delete.call({}, first, metadata)
+   assert.deepEqual(await service.delete.call({}, first, metadata), result)
+   assert.deepEqual(await service.delete.call({}, first, { ...metadata, revision: '1' }), result)
+   await service.update.call({}, second, { name: 'missing' }, metadata)
+   await service.delete.call({}, first, { ...metadata, revision: '3' })
+   assert.deepEqual(calls, [first, second, first])
+   assert.deepEqual(queries.filter(({ sql }) => sql.includes('INSERT INTO "users"')).map(({ values }) => values), [
+      [first, `deleted-${first}@tombstone.invalid`],
+      [second, `deleted-${second}@tombstone.invalid`],
+      [first, `deleted-${first}@tombstone.invalid`],
+   ])
+})
+
+test('invalid tombstone factory results roll back before writing a tombstone', async () => {
+   for (const [data, message] of [
+      [null, /plain object/],
+      [[], /plain object/],
+      [{ 'email; DROP TABLE users': '' }, /simple SQL identifier/],
+      [{ uid: 'override' }, /sync-managed column/],
+      [{ version: '0' }, /sync-managed column/],
+      [{ deleted: false }, /sync-managed column/],
+   ]) {
+      const queries = []
+      const client = {
+         async query(sql) {
+            queries.push(sql)
+            return { rows: sql.includes('SELECT revision, result') ? [{ revision: '0', result: null }] : [] }
+         },
+         release() {},
+      }
+      const services = new Map()
+      electricServerPlugin({ createService(name, methods) { services.set(name, methods) }, get() {} },
+         { query: client.query.bind(client), async connect() { return client } },
+         [{ name: 'users', primaryKey: 'uid', tombstoneData: () => data }], { sync: true })
+      await assert.rejects(services.get('users').delete.call({}, '64d76168-775f-481e-8974-18d31d835d9e', {
+         clientId: '5e199e1c-23a4-473e-9989-14d4a1fb857e', revision: '1',
+      }), message)
+      assert.ok(queries.includes('ROLLBACK'))
+      assert.ok(!queries.some(sql => sql.includes('INSERT INTO "users"')))
+   }
+})

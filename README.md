@@ -13,7 +13,7 @@ ALTER SYSTEM SET max_replication_slots = 10;
 ALTER SYSTEM SET max_wal_senders = 10;
 ALTER ROLE chris WITH REPLICATION;
 
-(restart postgres: `sudo systemctl restart postgresql`)
+(restart postgres)
 
 ## Use HTTP2
 nginx: `listen 443 ssl http2;`
@@ -99,6 +99,29 @@ newer edit from that client. Deletes write versioned tombstones instead of remov
 rows. Configure `tombstoneData` for required columns without defaults, such as a
 required title. Keep the cursor table and tombstones to protect delayed retries and
 offline clients. This does not resolve concurrent edits by different clients.
+
+`tombstoneData` can also be a function receiving `{ id }` and returning a plain
+object (or a promise of one). It runs inside the mutation transaction whenever a
+tombstone is written, including an update targeting a missing or deleted row.
+Replayed or stale revisions return the saved result without calling it again.
+For a unique, required email column, derive a dummy value from the row's UUID:
+
+```js
+{
+  name: 'user',
+  primaryKey: 'uid',
+  tombstoneData: ({ id }) => ({
+    email: `deleted-${id}@tombstone.invalid`,
+    name: '',
+    color: '',
+  }),
+}
+```
+
+The returned keys must be valid column identifiers and cannot include the primary
+key, `version`, or `deleted`. Reserve the dummy email pattern for tombstones so
+active users cannot occupy those values. A deterministic value remains stable
+across repeated deletions; a function can also generate a fresh random value.
 
 Import `prepareElectricSyncSchema` alongside `electricServerPlugin`. It adds
 `version` and `deleted` columns and creates the shared version sequence and cursor
@@ -239,11 +262,9 @@ can pass plugin-level `localDb` to retain automatic ownership management.
 
 ### Explicit offline models
 
-For offline writes, install `@electric-sql/pglite`, pass a shared PGlite database
-as `localDb`, and use the sync
-server mode above. `PGliteWorker` with an IndexedDB data directory is recommended
-for multiple tabs. Only one worker should use `ownsSync: true`; use a shared
-`BroadcastChannel` so other tabs receive change notifications.
+For offline writes, install `@electric-sql/pglite`, pass a shared PGlite database as `localDb`, and use the sync server mode above.
+`PGliteWorker` with an IndexedDB data directory is recommended for multiple tabs.
+Only one worker should use `ownsSync: true`; use a shared `BroadcastChannel` so other tabs receive change notifications.
 
 ```js
 const todo = app.createElectricModel('todos', {

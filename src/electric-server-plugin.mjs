@@ -186,8 +186,12 @@ async function syncMutation(db, model, action, id, data, mutation) {
          WHERE table_name = $1 AND client_id = $2 AND row_id = $3 FOR UPDATE`, key)
       const cursor = rows[0]
       if (BigInt(revision) <= BigInt(cursor.revision)) return cursor.result
+      // A committed create may have lost its response. Later local edits still
+      // arrive as create, but must update the row this client already wrote.
+      const editedCreate = action === 'create' && BigInt(cursor.revision) > 0n
+         && Object.entries(data).some(([column, value]) => column !== model.primaryKey && value !== undefined)
       let result
-      if (action === 'create') {
+      if (action === 'create' && !editedCreate) {
          const entries = Object.entries({ ...data, [model.primaryKey]: id }).filter(([, value]) => value !== undefined)
          const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
          const values = entries.map(([, value]) => value)
@@ -196,7 +200,7 @@ async function syncMutation(db, model, action, id, data, mutation) {
             ON CONFLICT (${model.quotedPrimaryKey}) DO UPDATE SET ${model.quotedPrimaryKey} = EXCLUDED.${model.quotedPrimaryKey}
             RETURNING *`, values)
          result = inserted.rows[0]
-      } else if (action === 'update') {
+      } else if (action === 'update' || editedCreate) {
          const set = buildSet(data, model.primaryKey)
          const updated = await tx.query(`UPDATE ${model.quotedTable} SET ${set.sql}, version = nextval('electric_sync_version_seq')
             WHERE ${model.quotedPrimaryKey} = $${set.values.length + 1} AND NOT deleted RETURNING *`, [...set.values, id])

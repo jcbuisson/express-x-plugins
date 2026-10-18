@@ -284,6 +284,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       if (!started) return
       started = false
       ++streamGeneration
+      // Drain previously queued snapshots, then invalidate this stream's view
+      // before a later flush can reconcile against another owner's shared rows.
+      background(resetSnapshot())
       clearInterval(timer)
       stream?.unsubscribeAll()
       channel?.removeEventListener('message', sharedChange)

@@ -152,6 +152,56 @@ test('stopping a waiting follower cancels takeover; restart can acquire ownershi
    }
 })
 
+test('a returning sync owner preserves shared rows until its new snapshot arrives', async () => {
+   const db = new PGlite()
+   const locks = new Locks()
+   const calls = []
+   const service = {
+      async create(id, data) {
+         calls.push(id)
+         return { id, ...data, version: '3', deleted: false }
+      },
+   }
+   const first = configure(db, locks, service)
+   const second = configure(db, locks, service)
+   const before = Stream.instances.length
+   const original = { id: crypto.randomUUID(), title: 'original', version: '1', deleted: false }
+   const changed = { ...original, title: 'updated by next owner', version: '2' }
+   const added = { id: crypto.randomUUID(), title: 'added by next owner', version: '2', deleted: false }
+   try {
+      const owner = first.createElectricModel('todos')
+      const follower = second.createElectricModel('todos')
+      await owner.prepare(); await follower.prepare()
+      await until(() => Stream.instances.length === before + 1)
+      Stream.instances.at(-1).shape.emit({ rows: [original] })
+      await until(async () => (await owner.findMany()).length === 1)
+      owner.stop()
+      await until(() => Stream.instances.length === before + 2)
+      Stream.instances.at(-1).shape.emit({ rows: [changed, added] })
+      await until(async () => (await follower.findMany()).length === 2)
+
+      follower.stop()
+      await owner.start()
+      await until(() => Stream.instances.length === before + 3)
+      // Flush before the returning owner's stream delivers any snapshot.
+      const created = await owner.create({ title: 'created after restart' })
+      await until(async () => {
+         const { rows } = await db.query('SELECT acknowledged_version FROM electric_mutation_queue WHERE row_id = $1', [created.id])
+         return rows[0]?.acknowledged_version != null
+      })
+      assert.equal(calls.length, 1)
+      assert.deepEqual(await owner.findUnique({ id: original.id }), changed)
+      assert.deepEqual(await owner.findUnique({ id: added.id }), added)
+      assert.equal((await owner.getStatus()).pending, 1)
+
+      Stream.instances.at(-1).shape.emit({ rows: [changed, added, { ...created, version: '3', deleted: false }] })
+      await until(async () => (await owner.getStatus()).pending === 0)
+      assert.equal((await owner.findMany()).length, 3)
+   } finally {
+      await first.disposeElectricSync(); await second.disposeElectricSync(); await db.close()
+   }
+})
+
 test('initialization errors reject writes and observable reads and call onError', async () => {
    const error = new Error('Worker could not load assets')
    const reported = []

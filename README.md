@@ -1,24 +1,6 @@
 
 # express-x-plugins
 
-
-IMPORTANT FOR ELECTRIC
-
-# set lc_messages=C for the PostgreSQL role so Electric receives recognizable English errors
-ALTER ROLE chris SET lc_messages = 'C';
-
-# ALLOW POSTGRES LOGICAL REPLICATION
-ALTER SYSTEM SET wal_level = 'logical';
-ALTER SYSTEM SET max_replication_slots = 10;
-ALTER SYSTEM SET max_wal_senders = 10;
-ALTER ROLE chris WITH REPLICATION;
-
-(restart postgres)
-
-## Use HTTP2
-nginx: `listen 443 ssl http2;`
-
-
 Currently includes:
 
 - a plugin which preserves room membership and socket data across page reloads
@@ -33,19 +15,39 @@ npm install @jcbuisson/express-x-plugins
 ```
 
 
-## Reload plugin
-
-### Server
-
-```js
-import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
-```
-
-
-## Local-first Postgres plugin
+## Electric plugin: local-first Postgres
 
 Express-X handles authorized PostgreSQL mutations; Electric streams committed rows to clients.
-For durable offline writes, use sync mode with a shared PGlite database.
+
+The electric plugin has two separate elections:
+
+- PGlite leader: owns the local database engine. IndexedDB shares the stored data, but it doesn’t share the running PostgreSQL engine.
+Each PGlite instance has its own in-memory state: caches, transaction state, and buffers.
+- Sync owner: chosen by a separate Web Lock per model; runs the Electric stream and sends queued mutations to the server.
+
+They prevent duplicate database engines and duplicate synchronization across tabs. The database leader and sync owner can be different tabs.
+
+
+### Settings
+```bash
+# set lc_messages=C for the PostgreSQL role so Electric receives recognizable English errors
+ALTER ROLE chris SET lc_messages = 'C';
+
+# ALLOW POSTGRES LOGICAL REPLICATION
+ALTER SYSTEM SET wal_level = 'logical';
+ALTER SYSTEM SET max_replication_slots = 10;
+ALTER SYSTEM SET max_wal_senders = 10;
+ALTER ROLE chris WITH REPLICATION;
+
+(restart postgres)
+```
+
+(?
+## Use HTTP2
+nginx: `listen 443 ssl http2;`
+)
+
+
 
 ### Server
 
@@ -343,3 +345,14 @@ volumes:
 docker compose pull electric
 docker compose up electric
 ```
+
+
+
+## Reload plugin
+
+### Server
+
+```js
+import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
+```
+

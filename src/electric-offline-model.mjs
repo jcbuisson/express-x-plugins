@@ -158,20 +158,23 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    async function reconcileSnapshot(rows) {
       await retryLeader(() => db.transaction(async tx => {
-         for (const row of rows) {
-            const id = String(row[primaryKey])
-            if (row.version != null) {
-               await tx.query(`DELETE FROM electric_mutation_queue
-                  WHERE model_name = $1 AND row_id = $2 AND acknowledged_version <= $3::numeric`,
-               [modelName, id, String(row.version)])
-            }
-            if (row.deleted) continue
-            await tx.query(`INSERT INTO electric_local_rows (model_name, row_id, data)
-               SELECT $1, $2, $3::jsonb WHERE NOT EXISTS
-                  (SELECT 1 FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2)
-               ON CONFLICT (model_name, row_id) DO UPDATE SET data = EXCLUDED.data`,
-            [modelName, id, json(row)])
-         }
+         // Send the snapshot once instead of making two worker round trips per row.
+         const incoming = json(rows)
+         await tx.query(`DELETE FROM electric_mutation_queue AS pending
+            USING jsonb_array_elements($2::jsonb) AS incoming(data)
+            WHERE pending.model_name = $1
+              AND pending.row_id = incoming.data->>$3
+              AND pending.acknowledged_version <= (incoming.data->>'version')::numeric`,
+         [modelName, incoming, primaryKey])
+         await tx.query(`INSERT INTO electric_local_rows (model_name, row_id, data)
+            SELECT $1, incoming.data->>$3, incoming.data
+            FROM jsonb_array_elements($2::jsonb) AS incoming(data)
+            WHERE NOT COALESCE((incoming.data->>'deleted')::boolean, false)
+              AND NOT EXISTS (SELECT 1 FROM electric_mutation_queue AS pending
+                 WHERE pending.model_name = $1 AND pending.row_id = incoming.data->>$3)
+            ON CONFLICT (model_name, row_id) DO UPDATE SET data = EXCLUDED.data
+            WHERE electric_local_rows.data IS DISTINCT FROM EXCLUDED.data`,
+         [modelName, incoming, primaryKey])
          const activeIds = rows.filter(row => !row.deleted).map(row => String(row[primaryKey]))
          await tx.query(`DELETE FROM electric_local_rows AS local
             WHERE local.model_name = $1 AND NOT (local.row_id = ANY($2::text[]))

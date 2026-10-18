@@ -152,7 +152,8 @@ export function electricServerPlugin(app, db, models, options = {}) {
    return { shapePath, sync, models: configuredModels.map(({ name, table, primaryKey }) => ({ name, table, primaryKey })) }
 }
 
-/** Run once before accepting sync mutations. Existing rows receive a version. */
+// Run once before accepting sync mutations: adds columns 'version' and 'deleted' to each table
+// Existing rows receive a version
 export async function prepareElectricSyncSchema(db, models) {
    const configuredModels = normalizeModels(models)
    await db.query('CREATE SEQUENCE IF NOT EXISTS electric_sync_version_seq')

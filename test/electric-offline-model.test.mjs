@@ -66,3 +66,43 @@ test('offline writes stay local until the acknowledged Electric version arrives'
       await db.close()
    }
 })
+
+test('large snapshots use three queries and preserve bigint versions and tombstones', async () => {
+   const db = new PGlite()
+   const { createOfflineElectricModel } = await import('../src/electric-offline-model.mjs')
+   let queries = 0
+   const countedDb = {
+      exec: (...args) => db.exec(...args),
+      query: (...args) => db.query(...args),
+      transaction: callback => db.transaction(tx => callback({
+         query: (...args) => { queries++; return tx.query(...args) },
+      })),
+   }
+   const model = createOfflineElectricModel({
+      db: countedDb, service: {}, modelName: 'range', primaryKey: 'uid',
+      ShapeStreamClass: Stream, ShapeClass: Shape, ownsSync: true,
+      network: { onLine: true }, retryMs: 60_000,
+   })
+   try {
+      await model.prepare()
+      model.start()
+      await model.waitForIdle()
+      const rows = Array.from({ length: 100 }, () => ({
+         uid: crypto.randomUUID(), label: 'shared', version: '9007199254740993', deleted: false,
+      }))
+      Shape.current.emit({ rows })
+      await model.waitForIdle()
+      assert.equal(queries, 3)
+      assert.equal((await model.findMany()).length, 100)
+      assert.equal((await model.findMany())[0].version, '9007199254740993')
+      queries = 0
+      Shape.current.emit({ rows: [{ ...rows[0], deleted: true }, { ...rows[1], label: 'changed' }] })
+      await model.waitForIdle()
+      assert.equal(queries, 3)
+      assert.deepEqual(await model.findMany(), [{ ...rows[1], label: 'changed' }])
+   } finally {
+      model.stop()
+      await model.waitForIdle()
+      await db.close()
+   }
+})

@@ -302,3 +302,62 @@ test('an indeterminate foreground mutation is not replayed automatically', async
       assert.equal((await model.getStatus()).pending, 1)
    } finally { await db.close() }
 })
+
+test('network lifecycle preserves offline edits, transfers ownership and respects manual stop', async () => {
+   const db = new PGlite()
+   const locks = new Locks()
+   const events = new EventTarget()
+   const network = { onLine: false }
+   const calls = []
+   const service = { async create(id, data) { calls.push(id); return { ...data, id, version: '1' } } }
+   const first = configure(db, locks, service, { network, networkEvents: events })
+   const second = configure(db, locks, service, { network, networkEvents: events })
+   const before = Stream.instances.length
+   let subscription
+   try {
+      const owner = first.createElectricModel('todos')
+      const follower = second.createElectricModel('todos')
+      await owner.prepare(); await follower.prepare()
+      let rows = []
+      subscription = follower.getObservable().subscribe(value => { rows = value })
+      const created = await owner.create({ title: 'Created offline' })
+      await until(() => rows.length === 1)
+      assert.equal(Stream.instances.length, before)
+      assert.equal(calls.length, 0)
+      assert.equal((await owner.getStatus()).pending, 1)
+
+      network.onLine = true
+      events.dispatchEvent(new Event('online'))
+      await until(() => Stream.instances.length === before + 1 && calls.length === 1)
+      const stream = Stream.instances.at(-1)
+      stream.shape.emit({ rows: [{ ...created, version: '1', deleted: false }] })
+      await until(async () => (await follower.getStatus()).pending === 0)
+
+      network.onLine = false
+      events.dispatchEvent(new Event('offline'))
+      await until(() => stream.stopped === true)
+      await follower.update(created.id, { title: 'Updated offline' })
+      assert.equal((await owner.findMany())[0].title, 'Updated offline')
+      assert.equal((await follower.getStatus()).pending, 1)
+      assert.equal(Stream.instances.length, before + 1)
+
+      owner.stop()
+      network.onLine = true
+      events.dispatchEvent(new Event('online'))
+      await until(() => Stream.instances.length === before + 2)
+      follower.stop()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      assert.equal(Stream.instances.length, before + 2, 'manually stopped owner must not take over')
+      await owner.start()
+      await until(() => Stream.instances.length === before + 3)
+      await first.disposeElectricSync()
+      await second.disposeElectricSync()
+      events.dispatchEvent(new Event('offline'))
+      events.dispatchEvent(new Event('online'))
+      await new Promise(resolve => setTimeout(resolve, 10))
+      assert.equal(Stream.instances.length, before + 3)
+   } finally {
+      subscription?.unsubscribe()
+      await first.disposeElectricSync(); await second.disposeElectricSync(); await db.close()
+   }
+})

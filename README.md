@@ -356,3 +356,12 @@ docker compose up electric
 import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
 ```
 
+
+Managed sync automatically pauses network ownership when `navigator.onLine` is
+false and resumes active models on the browser's `online` event. Local reads,
+writes, queued edits, and cross-tab notifications remain available while offline.
+A model explicitly stopped with `model.stop()` stays stopped after reconnection.
+Disposing a model removes its network listeners. Browser connectivity is a hint;
+requests can still fail while reported online and retain the usual retry behavior.
+For custom runtimes/tests, plugin options `network` and `networkEvents` can supply
+the connectivity state and an EventTarget respectively.

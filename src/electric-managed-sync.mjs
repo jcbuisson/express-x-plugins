@@ -58,13 +58,15 @@ export function createManagedSync(options, createModel) {
       let channel
       let offline
       let error = null
+      const network = modelOptions.network ?? options.network ?? globalThis.navigator
+      const networkEvents = options.networkEvents ?? globalThis
       function report(cause) {
          error = cause
          try { (modelOptions.onError ?? options.onError)?.(cause, { modelName: name }) } catch (callbackError) { console.error(callbackError) }
       }
       const ready = getDatabase().then(async db => {
          channel = new Channel(`express-x:${databaseName}:${name}`)
-         offline = createModel(name, { ...modelOptions, localDb: db, channel, ownsSync: false, onError: report })
+         offline = createModel(name, { ...modelOptions, network, localDb: db, channel, ownsSync: false, onError: report })
          const prepared = preparation.then(() => offline.prepare())
          preparation = prepared.catch(() => {})
          await prepared
@@ -78,10 +80,11 @@ export function createManagedSync(options, createModel) {
       function startOwnership() {
          if (controller || disposed || !active) return
          offline.start()
+         if (network?.onLine === false) return
          controller = new AbortController()
          const ownerGeneration = ++generation
          void locks.request(`express-x:${databaseName}:${name}`, { signal: controller.signal }, async () => {
-            if (!active || disposed || generation !== ownerGeneration) return
+            if (!active || disposed || network?.onLine === false || generation !== ownerGeneration) return
             try {
                offline.setSyncOwner(true)
                await new Promise(resolve => { release = resolve })
@@ -91,16 +94,26 @@ export function createManagedSync(options, createModel) {
             }
          }).catch(cause => { if (cause.name !== 'AbortError') report(cause) })
       }
-      function stop() {
-         active = false
+      function releaseOwnership() {
          ++generation
          controller?.abort()
          controller = undefined
          release?.()
          release = undefined
          offline?.setSyncOwner(false)
+      }
+      function stop() {
+         active = false
+         releaseOwnership()
          offline?.stop()
       }
+      function updateNetwork() {
+         if (disposed) return
+         if (network?.onLine === false) releaseOwnership()
+         else if (active) void ready.then(startOwnership).catch(report)
+      }
+      networkEvents.addEventListener?.('offline', updateNetwork)
+      networkEvents.addEventListener?.('online', updateNetwork)
       function start() {
          if (disposed) throw new Error('Electric model has been disposed')
          active = true
@@ -115,6 +128,8 @@ export function createManagedSync(options, createModel) {
          async dispose() {
             if (disposed) return
             disposed = true
+            networkEvents.removeEventListener?.('offline', updateNetwork)
+            networkEvents.removeEventListener?.('online', updateNetwork)
             stop()
             try { await ready; await offline.waitForIdle() } finally { channel?.close(); models.delete(name) }
          },

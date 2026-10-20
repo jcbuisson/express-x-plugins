@@ -150,11 +150,12 @@ app.configure(electricClientPlugin, {
   shapePath: '/electric/v1/shape',
 })
 
-// Client-generated UUID stored in the default `id` primary key:
+// Client-generated UUID stored in the default `uid` primary key:
 const todo = app.createElectricModel('todos')
 
 // Or, for a database-generated primary key such as SERIAL/IDENTITY:
 const numberedTodo = app.createElectricModel('numberedTodos', {
+  primaryKey: 'id',
   idGeneration: 'server',
 })
 
@@ -192,7 +193,7 @@ app.configure(electricClientPlugin, {
   onError: (error, { modelName }) => console.error(modelName, error),
 })
 
-const ranges = app.createElectricModel('range', { primaryKey: 'uid' })
+const ranges = app.createElectricModel('range')
 const subscription = ranges.getObservable().subscribe(rows => console.log(rows))
 await ranges.create({ label: 'Works offline' })
 await ranges.update(uid, { label: 'Edited offline' })
@@ -365,3 +366,12 @@ Disposing a model removes its network listeners. Browser connectivity is a hint;
 requests can still fail while reported online and retain the usual retry behavior.
 For custom runtimes/tests, plugin options `network` and `networkEvents` can supply
 the connectivity state and an EventTarget respectively.
+
+
+Models default to `primaryKey: 'uid'` on both client and server. Set
+`primaryKey: 'id'` explicitly for tables that use `id`.
+
+With `sync: true`, the sync owner's Electric stream stays active when its tab is
+hidden because it serves other tabs too. To customize this behavior, pass
+`streamOptions.runtimeVisibility` to `createElectricModel`. Other stream options
+are preserved. Independent streams retain Electric's normal visibility behavior.

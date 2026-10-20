@@ -9,7 +9,7 @@ import { createManagedSync } from './electric-managed-sync.mjs'
  *
  * Usage:
  *   electricClientPlugin(app)
- *   const todoModel = app.createElectricModel('todos') // primary key is automatically provided by server (auto-increment)
+ *   const todoModel = app.createElectricModel('todos') // client-generated UUID in the default uid primary key
  *   const todoMilk = await todoModel.create({ label: "Buy milk" })
  *   todoMilk.update({ completed: true })
  *   todoModel.getObservable({ completed: false }).subscribe(...) // subscribe to an observable for todos with completed===false
@@ -26,7 +26,7 @@ export function electricClientPlugin(app, options = {}) {
 
    function createElectricModel(modelName, modelOptions = {}) {
       quoteIdentifier(modelName)
-      quoteIdentifier(modelOptions.primaryKey ?? 'id')
+      quoteIdentifier(modelOptions.primaryKey ?? 'uid')
       if (managed) {
          if (modelOptions.idGeneration === 'server') throw new TypeError('sync models require client-generated UUIDs')
          return managed.model(modelName, modelOptions)
@@ -39,7 +39,7 @@ export function electricClientPlugin(app, options = {}) {
       const url = modelOptions.url ?? modelPath(shapePath, modelName)
       if (modelOptions.localDb) return createOfflineElectricModel({
          db: modelOptions.localDb, service, modelName, url,
-         primaryKey: modelOptions.primaryKey ?? 'id',
+         primaryKey: modelOptions.primaryKey ?? 'uid',
          ShapeStreamClass, ShapeClass,
          ownsSync: modelOptions.ownsSync ?? true,
          channel: modelOptions.channel,
@@ -50,7 +50,7 @@ export function electricClientPlugin(app, options = {}) {
       })
       const streamOptions = modelOptions.streamOptions ?? {}
       const idGeneration = modelOptions.idGeneration ?? 'client'
-      const primaryKey = modelOptions.primaryKey ?? 'id'
+      const primaryKey = modelOptions.primaryKey ?? 'uid'
       quoteIdentifier(primaryKey)
       if (!['client', 'server'].includes(idGeneration)) {
          throw new TypeError("idGeneration must be 'client' or 'server'")

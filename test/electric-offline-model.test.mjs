@@ -22,14 +22,14 @@ test('edits survive a committed create whose response was lost', async () => {
    let model
    try {
       await server.exec('CREATE TABLE todos (id UUID PRIMARY KEY, title TEXT NOT NULL)')
-      await prepareElectricSyncSchema(server, [{ name: 'todos', tombstoneData: { title: '' } }])
+      await prepareElectricSyncSchema(server, [{ name: 'todos', primaryKey: 'id', tombstoneData: { title: '' } }])
       let service
       const pool = {
          query: server.query.bind(server),
          async connect() { return { query: server.query.bind(server), release() {} } },
       }
       electricServerPlugin({ createService(_name, methods) { service = methods }, get() {} }, pool,
-         [{ name: 'todos', tombstoneData: { title: '' } }], { sync: true })
+         [{ name: 'todos', primaryKey: 'id', tombstoneData: { title: '' } }], { sync: true })
       let loseResponse = true
       const requests = []
       const proxy = {
@@ -42,7 +42,7 @@ test('edits survive a committed create whose response was lost', async () => {
       }
       const app = { service: () => proxy }
       electricClientPlugin(app, { ShapeStream: Stream, Shape })
-      model = app.createElectricModel('todos', { localDb: db, retryMs: 60_000 })
+      model = app.createElectricModel('todos', { primaryKey: 'id', localDb: db, retryMs: 60_000 })
       await model.prepare()
       const row = await model.create({ title: 'original' })
       await model.flushQueue()
@@ -95,7 +95,7 @@ test('offline writes stay local until the acknowledged Electric version arrives'
    }
    const app = { service: () => service }
    electricClientPlugin(app, { ShapeStream: Stream, Shape })
-   const model = app.createElectricModel('todos', { localDb: db, network: { onLine: false }, retryMs: 60_000 })
+   const model = app.createElectricModel('todos', { primaryKey: 'id', localDb: db, network: { onLine: false }, retryMs: 60_000 })
    try {
       await model.prepare()
       const local = await model.create({ title: 'offline' })
@@ -105,7 +105,7 @@ test('offline writes stay local until the acknowledged Electric version arrives'
       assert.equal(calls.length, 0)
 
       // Simulate reconnect, then an old Shape snapshot followed by confirmation.
-      const onlineModel = app.createElectricModel('todos', { localDb: db, network: { onLine: true }, retryMs: 60_000 })
+      const onlineModel = app.createElectricModel('todos', { primaryKey: 'id', localDb: db, network: { onLine: true }, retryMs: 60_000 })
       await onlineModel.flushQueue()
       assert.equal(calls.length, 1)
       assert.equal(calls[0].metadata.revision, '1')

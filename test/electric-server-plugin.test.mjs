@@ -17,7 +17,7 @@ function fixture({ authorize = async () => true, fetch } = {}) {
       createService(name, methods) { services.set(name, methods) },
       get(path, handler) { routes.set(path, handler) },
    }
-   const registration = electricServerPlugin(app, db, ['todos'], { authorize, fetch: fetch ?? globalThis.fetch })
+   const registration = electricServerPlugin(app, db, [{ name: 'todos', primaryKey: 'id' }], { authorize, fetch: fetch ?? globalThis.fetch })
    return { app, db, services, routes, queries, registration }
 }
 
@@ -192,7 +192,7 @@ test('sync mode commits a versioned write and rejects replayed or stale revision
 
 test('sync schema prepares version and tombstone columns', async () => {
    const queries = []
-   await prepareElectricSyncSchema({ query: async sql => { queries.push(sql) } }, ['todos'])
+   await prepareElectricSyncSchema({ query: async sql => { queries.push(sql) } }, [{ name: 'todos', primaryKey: 'id' }])
    assert.equal(queries.length, 4)
    assert.match(queries[2], /ADD COLUMN IF NOT EXISTS version BIGINT/)
    assert.match(queries[3], /ADD COLUMN IF NOT EXISTS deleted BOOLEAN/)
@@ -300,4 +300,11 @@ test('invalid tombstone factory results roll back before writing a tombstone', a
       assert.ok(queries.includes('ROLLBACK'))
       assert.ok(!queries.some(sql => sql.includes('INSERT INTO "users"')))
    }
+})
+
+
+test('server models default to the uid primary key', () => {
+   const app = { createService() {}, get() {} }
+   const result = electricServerPlugin(app, { query() {} }, ['users'], { authorize: async () => true })
+   assert.equal(result.models[0].primaryKey, 'uid')
 })

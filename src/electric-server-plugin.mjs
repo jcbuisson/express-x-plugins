@@ -253,7 +253,7 @@ function normalizeModels(models) {
       }
       const name = config.name
       const table = config.table ?? name
-      const primaryKey = config.primaryKey ?? 'id'
+      const primaryKey = config.primaryKey ?? 'uid'
       quoteIdentifier(name, 'model name')
       const tombstoneData = config.tombstoneData ?? {}
       if (typeof tombstoneData !== 'function') validateTombstoneData(tombstoneData, primaryKey)

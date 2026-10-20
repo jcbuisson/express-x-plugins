@@ -76,13 +76,26 @@ test('managed models initialize automatically, share one database, and cache mod
       assert.equal(dataDir, 'idb://test-db'); created++; return db
    } })
    try {
-      const users = app.createElectricModel('users', { primaryKey: 'uid' })
-      const ranges = app.createElectricModel('ranges', { primaryKey: 'uid' })
+      const users = app.createElectricModel('users')
+      const customVisibility = { getCurrentState: () => 'hidden', subscribe: () => () => {} }
+      const ranges = app.createElectricModel('ranges', { streamOptions: { runtimeVisibility: customVisibility, params: { test: 'preserved' } } })
       assert.equal(app.createElectricModel('users', { primaryKey: 'uid' }), users)
-      assert.throws(() => app.createElectricModel('users'), /primaryKey/)
+      assert.equal(app.createElectricModel('users'), users)
+      assert.throws(() => app.createElectricModel('users', { primaryKey: 'id' }), /primaryKey/)
       const row = await users.create({ name: 'Works before prepare' })
       await ranges.prepare()
       assert.equal(created, 1)
+      await until(() => Stream.instances.some(stream => stream.options.url.endsWith('/users')))
+      const visibility = Stream.instances.findLast(stream => stream.options.url.endsWith('/users')).options.runtimeVisibility
+      assert.equal(visibility.getCurrentState(), 'visible')
+      let notified = false
+      const cleanup = visibility.subscribe(() => { notified = true })
+      cleanup()
+      assert.equal(notified, false)
+      await until(() => Stream.instances.some(stream => stream.options.url.endsWith('/ranges')))
+      const rangeOptions = Stream.instances.findLast(stream => stream.options.url.endsWith('/ranges')).options
+      assert.equal(rangeOptions.runtimeVisibility, customVisibility)
+      assert.deepEqual(rangeOptions.params, { test: 'preserved' })
       assert.equal((await users.findUnique({ uid: row.uid })).name, row.name)
    } finally {
       await app.disposeElectricSync()
@@ -100,8 +113,8 @@ test('only one tab streams and flushes; follower edits broadcast and ownership t
    const before = Stream.instances.length
    let subscription
    try {
-      const owner = first.createElectricModel('todos')
-      const follower = second.createElectricModel('todos')
+      const owner = first.createElectricModel('todos', { primaryKey: 'id' })
+      const follower = second.createElectricModel('todos', { primaryKey: 'id' })
       await owner.prepare()
       await follower.prepare()
       await until(() => Stream.instances.length === before + 1)
@@ -137,8 +150,8 @@ test('stopping a waiting follower cancels takeover; restart can acquire ownershi
    const second = configure(db, locks)
    const before = Stream.instances.length
    try {
-      const owner = first.createElectricModel('todos')
-      const follower = second.createElectricModel('todos')
+      const owner = first.createElectricModel('todos', { primaryKey: 'id' })
+      const follower = second.createElectricModel('todos', { primaryKey: 'id' })
       await owner.prepare(); await follower.prepare()
       await until(() => Stream.instances.length === before + 1)
       follower.stop()
@@ -169,8 +182,8 @@ test('a returning sync owner preserves shared rows until its new snapshot arrive
    const changed = { ...original, title: 'updated by next owner', version: '2' }
    const added = { id: crypto.randomUUID(), title: 'added by next owner', version: '2', deleted: false }
    try {
-      const owner = first.createElectricModel('todos')
-      const follower = second.createElectricModel('todos')
+      const owner = first.createElectricModel('todos', { primaryKey: 'id' })
+      const follower = second.createElectricModel('todos', { primaryKey: 'id' })
       await owner.prepare(); await follower.prepare()
       await until(() => Stream.instances.length === before + 1)
       Stream.instances.at(-1).shape.emit({ rows: [original] })
@@ -209,7 +222,7 @@ test('initialization errors reject writes and observable reads and call onError'
       createDatabase: async () => { throw error },
       onError: cause => reported.push(cause),
    })
-   const model = app.createElectricModel('todos')
+   const model = app.createElectricModel('todos', { primaryKey: 'id' })
    await assert.rejects(model.create({ title: 'No silent failure' }), /load assets/)
    await new Promise(resolve => model.getObservable().subscribe({ error: cause => {
       assert.equal(cause, error); resolve()
@@ -239,7 +252,7 @@ test('default worker errors and timeouts reject preparation instead of hanging',
          terminate() { terminated = true }
       }
       const app = configure(undefined, new Locks(), {}, { workerFactory: () => new Worker(), initTimeoutMs: 30 })
-      const model = app.createElectricModel('todos')
+      const model = app.createElectricModel('todos', { primaryKey: 'id' })
       await assert.rejects(model.prepare(), triggerError ? /module not found/ : /timed out/)
       assert.equal(terminated, true)
       await assert.rejects(app.disposeElectricSync())
@@ -266,7 +279,7 @@ test('snapshots and reads recover after a database leader changes', async () => 
    const app = configure(shared, new Locks())
    const before = Stream.instances.length
    try {
-      const model = app.createElectricModel('todos')
+      const model = app.createElectricModel('todos', { primaryKey: 'id' })
       await model.prepare()
       await until(() => Stream.instances.length === before + 1)
       failSnapshot = true
@@ -315,8 +328,8 @@ test('network lifecycle preserves offline edits, transfers ownership and respect
    const before = Stream.instances.length
    let subscription
    try {
-      const owner = first.createElectricModel('todos')
-      const follower = second.createElectricModel('todos')
+      const owner = first.createElectricModel('todos', { primaryKey: 'id' })
+      const follower = second.createElectricModel('todos', { primaryKey: 'id' })
       await owner.prepare(); await follower.prepare()
       let rows = []
       subscription = follower.getObservable().subscribe(value => { rows = value })

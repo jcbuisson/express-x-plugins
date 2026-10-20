@@ -47,7 +47,7 @@ export function createManagedSync(options, createModel) {
       if (closed) throw new Error('Electric sync has been disposed')
       const existing = models.get(name)
       if (existing) {
-         if (existing.primaryKey !== (modelOptions.primaryKey ?? 'id')) throw new TypeError('A cached sync model cannot change primaryKey')
+         if (existing.primaryKey !== (modelOptions.primaryKey ?? 'uid')) throw new TypeError('A cached sync model cannot change primaryKey')
          return existing.api
       }
       let active = true
@@ -66,7 +66,15 @@ export function createManagedSync(options, createModel) {
       }
       const ready = getDatabase().then(async db => {
          channel = new Channel(`express-x:${databaseName}:${name}`)
-         offline = createModel(name, { ...modelOptions, network, localDb: db, channel, ownsSync: false, onError: report })
+         // The sync owner serves every tab, even while its own tab is hidden.
+         const streamOptions = {
+            ...modelOptions.streamOptions,
+            runtimeVisibility: modelOptions.streamOptions?.runtimeVisibility ?? {
+               getCurrentState: () => 'visible',
+               subscribe: () => () => {},
+            },
+         }
+         offline = createModel(name, { ...modelOptions, streamOptions, network, localDb: db, channel, ownsSync: false, onError: report })
          const prepared = preparation.then(() => offline.prepare())
          preparation = prepared.catch(() => {})
          await prepared
@@ -153,7 +161,7 @@ export function createManagedSync(options, createModel) {
          flushQueue: () => invoke('flushQueue'),
          getStatus: async () => ({ ...await invoke('getStatus'), error: error?.message ?? null }),
       }
-      models.set(name, { api, primaryKey: modelOptions.primaryKey ?? 'id' })
+      models.set(name, { api, primaryKey: modelOptions.primaryKey ?? 'uid' })
       return api
    }
    async function dispose() {

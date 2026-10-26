@@ -375,3 +375,66 @@ With `sync: true`, the sync owner's Electric stream stays active when its tab is
 hidden because it serves other tabs too. To customize this behavior, pass
 `streamOptions.runtimeVisibility` to `createElectricModel`. Other stream options
 are preserved. Independent streams retain Electric's normal visibility behavior.
+
+## Custom metadata sync plugin
+
+The original timestamp/metadata synchronization engine is available separately
+from Electric:
+
+```sh
+npm install dexie uuid @vueuse/core rxjs vue drizzle-orm
+```
+
+On the server, register Drizzle tables with a `uid` primary key and a shared
+metadata table (`uid` primary key, `created_at`, `updated_at`, `deleted_at`
+timestamps):
+
+```js
+import { syncServerPlugin } from '@jcbuisson/express-x-plugins/sync-server'
+
+app.configure(syncServerPlugin, db, metadata, [todos], {
+  authorize: async (context, { modelName, action, args }) => {
+    return Boolean(context.socket?.data?.user)
+  },
+})
+```
+
+The plugin registers each model's `findUnique`, `findMany`, `createWithMeta`,
+`updateWithMeta`, and `deleteWithMeta` methods, plus `sync.go`. Configure each
+model service's Express-X publishing policy to send mutation events to its
+authorized subscribers. Authorization is required; `maxSyncRecords` defaults
+to 10,000. Use separate applications for Electric and custom sync services
+when their model names overlap.
+
+On the client:
+
+```js
+import { syncClientPlugin } from '@jcbuisson/express-x-plugins/sync-client'
+
+app.configure(syncClientPlugin, { cacheNamespace: 'my-app:current-user' })
+const todo = app.createOfflineModel('todos', ['label'])
+const subscription = todo.getObservable({}).subscribe(rows => console.log(rows))
+await todo.create({ label: 'Available offline' })
+await todo.update(uid, { label: 'Edited offline' })
+await todo.remove(uid)
+subscription.unsubscribe()
+```
+
+The client persists rows and dirty mutations in Dexie/IndexedDB and reconciles
+subscribed filters on reconnect. `cacheNamespace` must be non-empty and should
+isolate each backend/user. Models support `findByUID`, `reset`, and
+`synchronizeAll` alongside observable reads and mutations. Vue scope disposal
+cleans up model listeners and filter subscriptions.
+
+The original names `offlinePlugin` and `drizzleOfflinePlugin` remain exported.
+The pure algorithm is exported as `computeSyncResult` from `/sync-algorithm`
+and `/sync-server`. It compares metadata timestamps and returns additions,
+updates, and deletions for each side. Writes outside the plugin must maintain
+the metadata table too. Tombstones persist; safe pruning requires knowing all
+clients have observed a deletion.
+
+Restored from the last committed custom implementations, dated July 8, 2026:
+`express-x` **edb1db3** (algorithm and regression tests), `express-x-client`
+**944c398** (client), and `express-x-drizzle` **ddf6804** (server). The algorithm
+was removed from Express-X in **47c2293** on July 19. Only module imports and
+plugin export aliases were adapted; the synchronization logic is preserved.

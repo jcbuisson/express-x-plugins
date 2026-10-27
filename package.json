@@ -12,7 +12,9 @@
     "./electric-worker": "./src/electric-pglite-worker.mjs",
     "./sync-client": "./src/sync-client-plugin.mjs",
     "./sync-server": "./src/sync-server-plugin.mjs",
-    "./sync-algorithm": "./src/sync-algorithm.mjs"
+    "./sync-algorithm": "./src/sync-algorithm.mjs",
+    "./electric-sql-server": "./src/electric-sql-server-plugin.mjs",
+    "./electric-sql-client": "./src/electric-sql-client-plugin.mjs"
   },
   "private": false,
   "publishConfig": {

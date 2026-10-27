@@ -192,10 +192,11 @@ test('sync mode commits a versioned write and rejects replayed or stale revision
 
 test('sync schema prepares version and tombstone columns', async () => {
    const queries = []
-   await prepareElectricSyncSchema({ query: async sql => { queries.push(sql) } }, [{ name: 'todos', primaryKey: 'id' }])
-   assert.equal(queries.length, 4)
+   await prepareElectricSyncSchema({ query: async sql => { queries.push(sql); return { rows: [] } } }, [{ name: 'todos', primaryKey: 'id' }])
+   assert.equal(queries.length, 5)
    assert.match(queries[2], /ADD COLUMN IF NOT EXISTS version BIGINT/)
    assert.match(queries[3], /ADD COLUMN IF NOT EXISTS deleted BOOLEAN/)
+   assert.match(queries[4], /FROM pg_constraint/)
 })
 
 test('sync delete writes a versioned tombstone and clears configured fields', async () => {

@@ -196,8 +196,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             const mutation = rows[0]
             if (!mutation) break
             try {
-               await sendMutation(mutation)
-               lastError = null
+               const rejection = await sendMutation(mutation)
+               if (rejection) report(rejection)
+               else lastError = null
             } catch (error) {
                report(error)
                if (!isPermanent(error)) break
@@ -222,6 +223,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             ? await service.update(id, withoutKey(data), metadata)
             : await service.delete(id, metadata)
       if (result?.version == null) throw new Error('sync mutation did not return a version')
+      let discarded = false
       await retryLeader(() => db.transaction(async tx => {
          const current = await tx.query('SELECT action, revision, data FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2', [modelName, id])
          const queued = current.rows[0]
@@ -229,6 +231,10 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          if (String(queued.revision) === String(mutation.revision) && queued.action === action) {
             await tx.query(`UPDATE electric_mutation_queue SET acknowledged_version = $3::numeric
                WHERE model_name = $1 AND row_id = $2`, [modelName, id, String(result.version)])
+            if (result.deleted && action !== 'delete') {
+               await tx.query('DELETE FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, id])
+               discarded = true
+            }
          } else if (action === 'create' && queued.action === 'create') {
             // The create was sent, then edited locally. Its next request is an update.
             await tx.query(`UPDATE electric_mutation_queue SET action = 'update',
@@ -237,6 +243,12 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       }))
       await reconcile()
       notify()
+      if (discarded) {
+         const error = new Error(result.syncRejection?.message ?? `Change to '${modelName}' discarded because the row was deleted`)
+         error.code = result.syncRejection?.code ?? 'sync-row-deleted'
+         error.rowId = id
+         return error
+      }
    }
 
    function withoutKey(data) {

@@ -4,6 +4,7 @@
 Currently includes:
 
 - a plugin which preserves room membership and socket data across page reloads
+
 - a plugin integrating ElectricSQL sync engine into express-x, which greatly simplifies relational database
 access and provides powerful local-first features
 
@@ -17,7 +18,10 @@ npm install @jcbuisson/express-x-plugins
 
 ## Electric plugin: local-first Postgres
 
-Express-X handles authorized PostgreSQL mutations; Electric streams committed rows to clients.
+Without managed sync (sync: false) or a supplied localDb, the client streams Shapes directly and sends CRUD calls directly;
+it has no persistent local mutation queue or owner election.
+
+Wth managed sync (sync: true) Express-X handles authorized PostgreSQL mutations; Electric streams committed rows to clients.
 
 The electric plugin has two separate elections:
 
@@ -26,6 +30,11 @@ Each PGlite instance has its own in-memory state: caches, transaction state, and
 - Sync owner: chosen by a separate Web Lock per model; runs the Electric stream and sends queued mutations to the server.
 
 They prevent duplicate database engines and duplicate synchronization across tabs. The database leader and sync owner can be different tabs.
+
+
+Electric’s does incremental replication: after the initial snapshot, it streams database changes instead of repeatedly comparing client/server metadata.
+Its Shapes can represent filtered subsets of tables
+
 
 
 ### Settings
@@ -129,6 +138,48 @@ Import `prepareElectricSyncSchema` alongside `electricServerPlugin`. It adds
 `version` and `deleted` columns and creates the shared version sequence and cursor
 table. The primary key must be UUID in sync mode. All writes to synced tables must
 advance `version`; hard deletes bypass tombstone confirmation.
+
+#### Relationships and offline deletes
+
+In sync mode, the server discovers PostgreSQL `ON DELETE CASCADE` foreign keys
+between configured models. Deleting a parent writes tombstones for its current
+children and descendants in the same transaction, including rows the deleting
+offline client never saw. A delayed create or update referencing a deleted parent
+is resolved as a child tombstone, so deletion wins in either arrival order.
+The result includes `syncRejection: { code: 'sync-parent-deleted', message }`.
+Retries replay that result through the normal mutation cursor.
+
+The browser removes a rejected optimistic row immediately, acknowledges its
+tombstone version, and reports an error through `onError` with `code` and `rowId`.
+It does not resend the rejected mutation. Electric's tombstone snapshot completes
+queue cleanup. An edit to an already deleted row is handled the same way, with
+`code: 'sync-row-deleted'`. If the parent is missing rather than deleted, the
+write remains retriable: its parent's offline create may still be queued.
+
+Pass the same complete model list, including `tombstoneData`, to
+`prepareElectricSyncSchema` and `electricServerPlugin`. Startup preparation also
+repairs existing active children of soft-deleted parents and their descendants.
+Clients only need to queue the parent deletion; explicit child deletions remain
+compatible. Cascades are part of the authorized parent deletion and do not invoke
+separate child authorization callbacks.
+
+These rules apply to single-column `ON DELETE CASCADE` foreign keys referencing
+the configured parent's primary key. Other foreign-key delete policies retain
+their existing behavior. Unsupported CASCADE keys between configured models
+fail discovery rather than silently losing integrity. Configure every model in
+the relationship graph. Restart the plugin after changing foreign keys: discovery
+is cached after the first sync mutation.
+
+Transactions affecting these relationships acquire one shared PostgreSQL advisory
+lock before cursor or row locks. This deliberately serializes relational writes
+across plugin instances, including cyclic graphs; models without discovered
+relationships remain parallel. All participating instances must use these rules.
+Direct SQL writes and non-sync services bypass this coordination.
+
+Regression tests run with `npm test`. To also exercise actual concurrent PostgreSQL
+transactions, set `ELECTRIC_TEST_DATABASE_URL` to a test database and run `npm test`.
+The PostgreSQL test creates and removes its own isolated schema and requires
+permission to create schemas; it does not use application tables.
 
 Without `sync: true`, the existing direct service methods remain available and
 return created, updated, or deleted rows directly.

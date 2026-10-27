@@ -1,3 +1,5 @@
+import { discoverSyncRelations } from './electric-sync-relations.mjs'
+
 /**
  * Register Express-X mutation services and an Electric Shape proxy.
  *
@@ -14,6 +16,12 @@ export function electricServerPlugin(app, db, models, options = {}) {
    const configuredModels = normalizeModels(models)
    const sync = options.sync === true
    if (sync && typeof db.connect !== 'function') throw new TypeError('sync requires a pg Pool with connect()')
+   let relationsPromise
+   const getRelations = () => relationsPromise ??= discoverSyncRelations(db, configuredModels).catch(error => {
+      relationsPromise = undefined
+      throw error
+   })
+   const mutate = async (...args) => syncMutation(db, ...args, await getRelations())
    const electricUrl = new URL(options.electricUrl ?? process.env.ELECTRIC_URL ?? 'http://localhost:3000/v1/shape')
    const shapePath = options.shapePath ?? '/electric/v1/shape/:model'
    const fetchImpl = options.fetch ?? globalThis.fetch
@@ -70,7 +78,7 @@ export function electricServerPlugin(app, db, models, options = {}) {
                : { ...mutationData }
             if (sync) {
                if (!hasClientId) throw new TypeError('sync mutations require a client-generated id')
-               return syncMutation(db, model, 'create', idOrData, safeData, mutation)
+               return mutate(model, 'create', idOrData, safeData, mutation)
             }
             const entries = Object.entries(safeData).filter(([, value]) => value !== undefined)
             const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
@@ -101,7 +109,7 @@ export function electricServerPlugin(app, db, models, options = {}) {
 
          update: async function(id, data, mutation) {
             await authorize(this, model.name, 'update', sync ? [id, data, mutation] : [id, data])
-            if (sync) return syncMutation(db, model, 'update', id, data, mutation)
+            if (sync) return mutate(model, 'update', id, data, mutation)
             const set = buildSet(data, model.primaryKey)
             return withTransaction(db, async client => {
                const result = await client.query(
@@ -114,7 +122,7 @@ export function electricServerPlugin(app, db, models, options = {}) {
 
          delete: async function(id, mutation) {
             await authorize(this, model.name, 'delete', sync ? [id, mutation] : [id])
-            if (sync) return syncMutation(db, model, 'delete', id, null, mutation)
+            if (sync) return mutate(model, 'delete', id, null, mutation)
             return withTransaction(db, async client => {
                const result = await client.query(
                   `DELETE FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 RETURNING *`, [id],
@@ -166,9 +174,11 @@ export async function prepareElectricSyncSchema(db, models) {
       await db.query(`ALTER TABLE ${model.quotedTable} ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT nextval('electric_sync_version_seq')`)
       await db.query(`ALTER TABLE ${model.quotedTable} ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT false`)
    }
+   const relations = await discoverSyncRelations(db, configuredModels)
+   await withTransaction(db, tx => relations.repair(tx, writeTombstone))
 }
 
-async function syncMutation(db, model, action, id, data, mutation) {
+async function syncMutation(db, model, action, id, data, mutation, relations) {
    if (!mutation || typeof mutation !== 'object') throw new TypeError('sync mutation metadata is required')
    const { clientId, revision } = mutation
    if (typeof clientId !== 'string' || !UUID.test(clientId)) throw new TypeError('clientId must be a UUID')
@@ -179,6 +189,7 @@ async function syncMutation(db, model, action, id, data, mutation) {
    if (action !== 'delete') assertPlainObject(data, 'mutation data')
    if (data && ('version' in data || 'deleted' in data)) throw new TypeError('version and deleted are managed by sync')
    return withTransaction(db, async tx => {
+      await relations.lock(tx, model)
       const key = [model.table, clientId, String(id)]
       await tx.query(`INSERT INTO electric_mutation_cursor (table_name, client_id, row_id)
          VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, key)
@@ -191,7 +202,10 @@ async function syncMutation(db, model, action, id, data, mutation) {
       const editedCreate = action === 'create' && BigInt(cursor.revision) > 0n
          && Object.entries(data).some(([column, value]) => column !== model.primaryKey && value !== undefined)
       let result
-      if (action === 'create' && !editedCreate) {
+      const rejection = await relations.deletedParent(tx, model, action, id, data, editedCreate)
+      if (rejection) {
+         result = { ...await writeTombstone(tx, model, id), syncRejection: rejection }
+      } else if (action === 'create' && !editedCreate) {
          const entries = Object.entries({ ...data, [model.primaryKey]: id }).filter(([, value]) => value !== undefined)
          const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
          const values = entries.map(([, value]) => value)
@@ -208,6 +222,7 @@ async function syncMutation(db, model, action, id, data, mutation) {
       } else {
          result = await writeTombstone(tx, model, id)
       }
+      if (result?.deleted) await relations.cascade(tx, model, id, writeTombstone)
       await tx.query(`UPDATE electric_mutation_cursor SET revision = $4, result = $5::jsonb
          WHERE table_name = $1 AND client_id = $2 AND row_id = $3`, [...key, String(revision), JSON.stringify(result ?? null)])
       return result
@@ -321,6 +336,7 @@ function buildSet(data, primaryKey, startIndex = 1) {
 }
 
 async function withTransaction(db, operation) {
+   if (typeof db?.connect !== 'function' && typeof db?.transaction === 'function') return db.transaction(operation)
    if (typeof db?.connect !== 'function') return operation(db)
    const client = await db.connect()
    try {

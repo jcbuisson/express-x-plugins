@@ -1,3 +1,4 @@
+import { shareQueryObservables } from './electric-query-observable.mjs'
 import { Shape, ShapeStream } from '@electric-sql/client'
 import { Observable, firstValueFrom, Subject, takeUntil } from 'rxjs'
 import { getCurrentScope, onScopeDispose } from 'vue'
@@ -56,7 +57,14 @@ export function electricClientPlugin(app, options = {}) {
          throw new TypeError("idGeneration must be 'client' or 'server'")
       }
 
+      const sharedObservable = shareQueryObservables(createObservable)
+
       function getObservable(where = {}) {
+         whereToElectricParams(where) // Preserve eager filter validation.
+         return sharedObservable(where)
+      }
+
+      function createObservable(where) {
          // Validate eagerly
          const filterParams = whereToElectricParams(where)
          return new ObservableClass(subscriber => {

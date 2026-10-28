@@ -1,3 +1,4 @@
+import { shareQueryObservables } from './electric-query-observable.mjs'
 import { Observable } from 'rxjs'
 
 /** Offline model backed by a shared PGlite database (normally PGliteWorker). */
@@ -67,7 +68,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       return (await findMany(where))[0] ?? null
    }
 
-   function getObservable(where = {}) {
+   const getObservable = shareQueryObservables(createObservable)
+
+   function createObservable(where) {
       return new Observable(subscriber => {
          let active = true
          const emit = () => { void findMany(where).then(rows => { if (active) subscriber.next(rows) }, error => subscriber.error(error)) }

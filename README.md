@@ -227,6 +227,12 @@ console.log(created.id)
 subscription.unsubscribe()
 ```
 
+Equivalent `getObservable(where)` filters share one underlying subscription per model,
+including in offline sync mode. New subscribers receive the latest result. The last
+unsubscribe releases the source and cache entry, so a later subscription reads fresh
+data. Filter key order does not matter; filters are captured when `getObservable` is called.
+
+
 ### Managed browser sync
 
 With a server configured with `sync: true`, the client plugin can own the shared

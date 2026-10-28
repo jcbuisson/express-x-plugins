@@ -1,4 +1,5 @@
 import { Shape, ShapeStream } from '@electric-sql/client'
+import Dexie from 'dexie'
 
 /** Install app.sql.query(name, params) and app.sql.watch(table, filter, callback). */
 export function electricSqlClientPlugin(app, options = {}) {
@@ -6,8 +7,17 @@ export function electricSqlClientPlugin(app, options = {}) {
    const Stream = options.ShapeStream ?? ShapeStream
    const LiveShape = options.Shape ?? Shape
    const active = new Set()
+   const persistent = options.persistence ?? Boolean(globalThis.indexedDB)
+   const database = persistent ? new Dexie(options.databaseName ?? 'express-x-sql') : null
+   if (database) database.version(1).stores({ shapes: '&key' })
+   const scope = JSON.stringify([options.serviceName ?? 'sql', options.shapePath ?? '/electric-sql/v1/shape'])
+   let writes = Promise.resolve()
+   let disposed = false
+   const report = error => options.onError?.(error)
+   const keyFor = (table, where, params) => JSON.stringify([scope, table, where ?? null, params])
    
    function watch(table, filter, callback) {
+      if (disposed) throw new Error('SQL client is disposed')
       if (typeof filter === 'function') { callback = filter; filter = {} }
       const { where, params = [] } = filter ?? {}
       if (typeof table !== 'string' || !table) throw new TypeError('table is required')
@@ -21,6 +31,13 @@ export function electricSqlClientPlugin(app, options = {}) {
          throw new TypeError('shape params must be strings, booleans, finite numbers, bigints or Dates; use IS NULL for null')
       })
       const controller = new AbortController()
+      const key = keyFor(table, where, values)
+      let stopped = false
+      let received = false
+      // Do not let a slow disk read overwrite a newer network snapshot.
+      if (database) database.shapes.get(key).then(snapshot => {
+         if (!stopped && !received && snapshot) callback(snapshot.rows)
+      }).catch(report)
       const stream = new Stream({
          url: `${(options.shapePath ?? '/electric-sql/v1/shape').replace(/\/$/, '')}/${encodeURIComponent(table)}`,
          headers: options.headers,
@@ -29,8 +46,17 @@ export function electricSqlClientPlugin(app, options = {}) {
          params: { ...(where === undefined ? {} : { where }), params: values },
       })
       const shape = new LiveShape(stream)
-      const unsubscribe = shape.subscribe(({ rows }) => callback([...rows]))
-      let stopped = false
+      const unsubscribe = shape.subscribe(({ rows }) => {
+         if (stopped) return
+         received = true
+         const current = [...rows]
+         if (database) {
+            // Clone before handing rows to application code; preserve Dates and bigints.
+            const snapshot = structuredClone({ key, rows: current })
+            writes = writes.then(() => database.shapes.put(snapshot)).catch(report)
+         }
+         callback(current)
+      })
 
       function stop() {
          if (stopped) return
@@ -46,7 +72,16 @@ export function electricSqlClientPlugin(app, options = {}) {
    app.sql = {
       query: (name, params = []) => service.query(name, params),
       watch,
-      dispose() { for (const stop of active) stop() },
+      async clearLocalData() {
+         await writes
+         if (database) await database.shapes.clear()
+      },
+      async dispose() {
+         disposed = true
+         for (const stop of active) stop()
+         await writes
+         database?.close()
+      },
    }
    return app
 }

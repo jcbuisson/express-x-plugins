@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { electricSqlServerPlugin } from '../src/electric-sql-server-plugin.mjs'
@@ -57,7 +58,7 @@ test('client binds SQL filters and stops network work on unsubscribe or disposal
       subscribe(callback) { this.stream.emit = callback; return () => { this.stream.unsubscribed = true } }
    }
    const app = { service: () => ({ query: async (...args) => args }) }
-   electricSqlClientPlugin(app, { ShapeStream: Stream, Shape })
+   electricSqlClientPlugin(app, { persistence: false, ShapeStream: Stream, Shape })
    assert.deepEqual(await app.sql.query('add', ['hello']), ['add', ['hello']])
    let rows
    const stop = app.sql.watch('todos', { where: 'done = $1', params: [false] }, value => { rows = value })
@@ -68,7 +69,56 @@ test('client binds SQL filters and stops network work on unsubscribe or disposal
    stop()
    assert.ok(streams[0].stopped && streams[0].unsubscribed && streams[0].options.signal.aborted)
    app.sql.watch('todos', () => {})
-   app.sql.dispose()
-   assert.ok(streams[1].options.signal.aborted)
    assert.throws(() => app.sql.watch('todos', { params: [null] }, () => {}), /IS NULL/)
+   await app.sql.dispose()
+   assert.ok(streams[1].options.signal.aborted)
+})
+
+test('persistent watches restore filtered snapshots after disposal, including empty results', async () => {
+   await import('fake-indexeddb/auto')
+   const streams = []
+   class Stream {
+      constructor() { streams.push(this) }
+      unsubscribeAll() {}
+   }
+   class Shape {
+      constructor(stream) { this.stream = stream }
+      subscribe(callback) { this.stream.emit = callback; return () => {} }
+   }
+   const databaseName = `sql-test-${crypto.randomUUID()}`
+   function client() {
+      const app = { service: () => ({ query: async () => [] }) }
+      electricSqlClientPlugin(app, { databaseName, ShapeStream: Stream, Shape })
+      return app.sql
+   }
+   const first = client()
+   first.watch('todos', { where: 'done = $1', params: [false] }, () => {})
+   const rows = [{ id: 1n, created: new Date('2026-01-01'), label: 'saved' }]
+   streams.at(-1).emit({ rows })
+   rows[0].label = 'mutated by caller'
+   first.watch('todos', { where: 'done = $1', params: [true] }, () => {})
+   streams.at(-1).emit({ rows: [] })
+   await first.dispose()
+   const second = client()
+   const restored = await new Promise(resolve => second.watch('todos', {
+      where: 'done = $1', params: [false],
+   }, resolve))
+   assert.deepEqual(restored, [{ id: 1n, created: new Date('2026-01-01'), label: 'saved' }])
+   assert.deepEqual(await new Promise(resolve => second.watch('todos', {
+      where: 'done = $1', params: [true],
+   }, resolve)), [])
+   // A fresh network snapshot must win against a pending IndexedDB read.
+   const seen = []
+   second.watch('todos', { where: 'done = $1', params: [false] }, value => seen.push(value))
+   streams.at(-1).emit({ rows: [{ id: 2 }] })
+   await second.dispose()
+   assert.deepEqual(seen, [[{ id: 2 }]])
+   assert.throws(() => second.watch('todos', () => {}), /disposed/)
+   const third = client()
+   await third.clearLocalData()
+   let delivered = false
+   const stop = third.watch('todos', () => { delivered = true })
+   stop()
+   await third.dispose()
+   assert.equal(delivered, false)
 })

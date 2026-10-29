@@ -101,6 +101,91 @@ async function syncFixture(t, schema, models) {
    return { server, local, services, app }
 }
 
+test('updates coalesce changed fields without resending generated snapshot columns', async t => {
+   const { app, local, server, services } = await syncFixture(t,
+      `CREATE TABLE todos (uid UUID PRIMARY KEY, qty INTEGER, title TEXT,
+         doubled INTEGER GENERATED ALWAYS AS (qty * 2) STORED)`, ['todos'])
+   const service = services.get('todos')
+   const original = await service.create(crypto.randomUUID(), { qty: 2, title: 'original' },
+      { clientId: crypto.randomUUID(), revision: '1' })
+   const requests = []
+   const update = service.update
+   service.update = async (...args) => { requests.push(args[1]); return update(...args) }
+   const network = { onLine: false }
+   const model = app.createElectricModel('todos', { localDb: local, network, retryMs: 60_000 })
+   t.after(async () => { model.stop(); await model.waitForIdle() })
+   await model.prepare()
+   model.start()
+   Shape.current.emit({ rows: [original] })
+   await model.waitForIdle()
+   await model.update(original.uid, { qty: 3 })
+   await model.update(original.uid, { title: 'changed' })
+   await model.update(original.uid, {})
+   network.onLine = true
+   await model.flushQueue()
+   assert.deepEqual(requests, [{ qty: 3, title: 'changed' }])
+   const updated = (await server.query('SELECT * FROM todos WHERE uid = $1', [original.uid])).rows[0]
+   assert.equal(updated.doubled, 6)
+   Shape.current.emit({ rows: [updated] })
+   await model.waitForIdle()
+   assert.equal((await model.getStatus()).pending, 0)
+   assert.equal((await model.findUnique({ uid: original.uid })).doubled, 6)
+
+   network.onLine = false
+   const created = await model.create({ qty: 5, title: 'queued create' })
+   await model.update(created.uid, { title: 'edited before send' })
+   network.onLine = true
+   await model.flushQueue()
+   const inserted = (await server.query('SELECT * FROM todos WHERE uid = $1', [created.uid])).rows[0]
+   assert.equal(inserted.qty, 5)
+   assert.equal(inserted.title, 'edited before send')
+   assert.equal(inserted.doubled, 10)
+})
+
+test('offline sync rejects partial Shapes and supports local query filters', async t => {
+   const db = new PGlite()
+   let model
+   let subscription
+   t.after(async () => {
+      subscription?.unsubscribe()
+      model?.stop()
+      await model?.waitForIdle()
+      await db.close()
+   })
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const invalidOptions = [
+      { streamOptions: { params: { where: 'qty > 0' } } },
+      { streamOptions: { params: { where: 'NOT deleted' } } },
+      { streamOptions: { params: { where: () => 'qty > 0' } } },
+      { url: '/electric/v1/shape/todos?where=qty%20%3E%200' },
+      { streamOptions: { params: { columns: ['uid', 'qty'] } } },
+      { url: '/electric/v1/shape/todos?columns=uid,qty' },
+      { streamOptions: { params: { log: 'changes_only' } } },
+      { streamOptions: { offset: 'now' } },
+      { url: '/electric/v1/shape/todos?offset=100_0' },
+      { streamOptions: { params: { subset__where: 'qty > 0' } } },
+   ]
+   for (const options of invalidOptions) {
+      assert.throws(() => app.createElectricModel('todos', { localDb: db, ...options }), /complete Shape including tombstones/)
+   }
+   const params = { log: 'full' }
+   model = app.createElectricModel('todos', { localDb: db, network: { onLine: false }, retryMs: 60_000, streamOptions: { params } })
+   // Options supplied by the caller cannot later turn the validated stream into a partial Shape.
+   params.where = 'qty > 0'
+   await model.prepare()
+   model.start()
+   const zero = { uid: crypto.randomUUID(), qty: 0, version: '1', deleted: false }
+   const positive = { uid: crypto.randomUUID(), qty: 2, version: '2', deleted: false }
+   Shape.current.emit({ rows: [zero, positive] })
+   await model.waitForIdle()
+   assert.deepEqual(await model.findMany({ qty: { gt: 0 } }), [positive])
+   let observed
+   subscription = model.getObservable({ qty: { gt: 0 } }).subscribe(rows => { observed = rows })
+   await new Promise(resolve => setTimeout(resolve, 0))
+   assert.deepEqual(observed, [positive])
+})
+
 test('a flush resolves reverse-ordered same-model parents without spinning on missing parents', async t => {
    const { app, local, server, services } = await syncFixture(t,
       'CREATE TABLE nodes (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES nodes(uid) ON DELETE CASCADE)',

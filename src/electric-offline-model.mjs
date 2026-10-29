@@ -4,6 +4,8 @@ import { Observable } from 'rxjs'
 /** Offline model backed by a shared PGlite database (normally PGliteWorker). */
 export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs, streamOptions = {}, onError }) {
    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(primaryKey)) throw new TypeError('primaryKey must be a simple SQL identifier')
+   assertFullSyncShape(url, streamOptions)
+   streamOptions = { ...streamOptions, params: { ...streamOptions.params } }
    let snapshot = null
    let operation = Promise.resolve()
    let flushing = false
@@ -100,16 +102,19 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       assertId(id)
       assertData(data)
       if (primaryKey in data || 'version' in data || 'deleted' in data) throw new TypeError('sync-managed columns cannot be updated')
+      const changes = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined))
       let row
       await db.transaction(async tx => {
          const current = await tx.query('SELECT data FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
          if (!current.rows[0]) throw new Error('row not found')
-         row = { ...current.rows[0].data, ...data }
+         row = { ...current.rows[0].data, ...changes }
+         if (!Object.keys(changes).length) return
          await tx.query('UPDATE electric_local_rows SET data = $3::jsonb WHERE model_name = $1 AND row_id = $2', [modelName, String(id), json(row)])
-         const queued = await tx.query('SELECT action, acknowledged_version FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
+         const queued = await tx.query('SELECT action, data, acknowledged_version FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
          if (queued.rows[0]?.action === 'delete') throw new Error('row has a pending delete')
          const action = queued.rows[0]?.action === 'create' && queued.rows[0].acknowledged_version == null ? 'create' : 'update'
-         await queueMutation(tx, id, action, row)
+         const pendingData = queued.rows[0]?.acknowledged_version == null ? queued.rows[0]?.data : null
+         await queueMutation(tx, id, action, { ...pendingData, ...changes })
       })
       notify()
       if (started) background(flushQueue())
@@ -340,6 +345,17 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
 function assertData(data) {
    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new TypeError('mutation data must be a plain object')
+}
+
+function assertFullSyncShape(url, options) {
+   const params = options.params ?? {}
+   const query = new URL(url ?? '', 'http://localhost').searchParams
+   const keys = new Set([...Object.keys(params).filter(key => params[key] != null), ...query.keys()])
+   if ([...keys].some(key => ['where', 'columns'].includes(key) || key.startsWith('subset__')) ||
+      [params.log, query.get('log')].some(value => value != null && value !== 'full') ||
+      [options.offset, params.offset, query.get('offset')].some(value => value != null && String(value) !== '-1')) {
+      throw new TypeError('Offline sync requires a complete Shape including tombstones; apply filters with findMany(where) or getObservable(where)')
+   }
 }
 
 function assertId(id) {

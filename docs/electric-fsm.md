@@ -131,6 +131,13 @@ incoming row ID = queued row ID
 AND incoming.version >= queued.acknowledged_version
 ```
 
+Offline sync requires a complete Shape, including tombstones and all columns.
+Stream `where`, `columns`, subset parameters, changes-only logs, and starting
+offsets other than `-1` are rejected before local writes can be queued. Apply
+filters through `findMany(where)` or `getObservable(where)` instead. A filtered
+stream can omit the version needed to confirm an update or delete, leaving
+its queue entry pending indefinitely.
+
 The snapshot transaction removes acknowledged queue entries first, then adopts
 unprotected live rows and removes unprotected rows missing from the live
 snapshot. Tombstones carry versions too, allowing deletes to be acknowledged.
@@ -167,6 +174,9 @@ Additional transition guards and actions:
 - Local remove hides the row immediately and queues delete. Update requires a
   local row. Updates to an unacknowledged queued create retain action `create`;
   updates after its acknowledgement use action `update`.
+- Updates queue only explicitly changed fields and merge them with any unsent
+  changes for that row. The optimistic local row remains complete. Generated
+  columns received in snapshots are therefore not written back to PostgreSQL.
 
 ## One server mutation request
 

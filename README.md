@@ -263,6 +263,10 @@ await app.disposeElectricSync()
 ```
 
 Models prepare and start automatically; operations wait for schema readiness.
+Offline sync streams require complete Shapes, including tombstones and all
+columns. Apply filters with `findMany(where)` or `getObservable(where)`;
+`streamOptions.params.where`, column projections, and other partial stream
+options are rejected because they can prevent mutation confirmation.
 Repeated calls for the same model reuse its instance. `findMany` and `findUnique`
 read the local cache immediately after preparation, which can be empty before
 Electric's first snapshot. Use `app.service('user').findMany({ deleted: false, ...filter })`

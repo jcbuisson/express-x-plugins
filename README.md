@@ -277,7 +277,9 @@ database worker across tabs. A separate Web Lock per database/model elects one
 tab to run the Electric stream and mutation queue. Follower writes notify the
 owner through BroadcastChannel. When the owner closes or stops, a waiting tab
 takes over. Stream ownership does not depend on PGlite's leader event timing.
-BIGINT values in cached rows are stored as lossless decimal strings. Snapshot
+BIGINT values in cached rows are stored as lossless decimal strings with type
+metadata, so equality and range filters compare them numerically without rounding.
+BIGINT filter values can be integers, decimal strings, or JavaScript bigints. Snapshot
 reconciliation and reads retry transient database leader changes. An indeterminate
 foreground local mutation is reported instead of blindly repeated.
 

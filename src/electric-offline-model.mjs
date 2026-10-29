@@ -40,8 +40,10 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          INSERT INTO electric_sync_client (singleton) VALUES (true) ON CONFLICT DO NOTHING;
          CREATE TABLE IF NOT EXISTS electric_local_rows (
             model_name TEXT NOT NULL, row_id TEXT NOT NULL, data JSONB NOT NULL,
+            bigint_columns TEXT[] NOT NULL DEFAULT '{}',
             PRIMARY KEY (model_name, row_id)
          );
+         ALTER TABLE electric_local_rows ADD COLUMN IF NOT EXISTS bigint_columns TEXT[] NOT NULL DEFAULT '{}';
          CREATE TABLE IF NOT EXISTS electric_mutation_queue (
             model_name TEXT NOT NULL, row_id TEXT NOT NULL,
             action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
@@ -66,8 +68,8 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    async function findMany(where = {}) {
       whereToElectricParams(where)
-      const { rows } = await retryLeader(() => db.query('SELECT data FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', [modelName]))
-      return rows.map(row => row.data).filter(row => matchesWhere(row, where))
+      const { rows } = await retryLeader(() => db.query('SELECT data, bigint_columns FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', [modelName]))
+      return rows.filter(row => matchesWhere(row.data, where, new Set(row.bigint_columns))).map(row => row.data)
    }
 
    async function findUnique(where) {
@@ -105,7 +107,8 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       assertId(id)
       const row = { ...data, [primaryKey]: id }
       await db.transaction(async tx => {
-         await tx.query('INSERT INTO electric_local_rows (model_name, row_id, data) VALUES ($1, $2, $3::jsonb)', [modelName, String(id), json(row)])
+         await tx.query('INSERT INTO electric_local_rows (model_name, row_id, data, bigint_columns) VALUES ($1, $2, $3::jsonb, $4::text[])',
+            [modelName, String(id), json(row), bigintColumns(row)])
          await queueMutation(tx, id, 'create', row)
       })
       notify()
@@ -120,11 +123,13 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       const changes = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined))
       let row
       await db.transaction(async tx => {
-         const current = await tx.query('SELECT data FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
+         const current = await tx.query('SELECT data, bigint_columns FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
          if (!current.rows[0]) throw new Error('row not found')
          row = { ...current.rows[0].data, ...changes }
          if (!Object.keys(changes).length) return
-         await tx.query('UPDATE electric_local_rows SET data = $3::jsonb WHERE model_name = $1 AND row_id = $2', [modelName, String(id), json(row)])
+         const types = [...new Set([...current.rows[0].bigint_columns, ...bigintColumns(changes)])]
+         await tx.query('UPDATE electric_local_rows SET data = $3::jsonb, bigint_columns = $4::text[] WHERE model_name = $1 AND row_id = $2',
+            [modelName, String(id), json(row), types])
          const queued = await tx.query('SELECT action, data, acknowledged_version FROM electric_mutation_queue WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
          if (queued.rows[0]?.action === 'delete') throw new Error('row has a pending delete')
          const action = queued.rows[0]?.action === 'create' && queued.rows[0].acknowledged_version == null ? 'create' : 'update'
@@ -183,21 +188,24 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       await retryLeader(() => db.transaction(async tx => {
          // Send the snapshot once instead of making two worker round trips per row.
          const incoming = json(rows)
+         const types = json(Object.fromEntries(rows.map(row => [String(row[primaryKey]), bigintColumns(row)])))
          await tx.query(`DELETE FROM electric_mutation_queue AS pending
             USING jsonb_array_elements($2::jsonb) AS incoming(data)
             WHERE pending.model_name = $1
               AND pending.row_id = incoming.data->>$3
               AND pending.acknowledged_version <= (incoming.data->>'version')::numeric`,
          [modelName, incoming, primaryKey])
-         await tx.query(`INSERT INTO electric_local_rows (model_name, row_id, data)
-            SELECT $1, incoming.data->>$3, incoming.data
+         await tx.query(`INSERT INTO electric_local_rows (model_name, row_id, data, bigint_columns)
+            SELECT $1, incoming.data->>$3, incoming.data,
+               ARRAY(SELECT jsonb_array_elements_text($4::jsonb -> (incoming.data->>$3)))
             FROM jsonb_array_elements($2::jsonb) AS incoming(data)
             WHERE NOT COALESCE((incoming.data->>'deleted')::boolean, false)
               AND NOT EXISTS (SELECT 1 FROM electric_mutation_queue AS pending
                  WHERE pending.model_name = $1 AND pending.row_id = incoming.data->>$3)
-            ON CONFLICT (model_name, row_id) DO UPDATE SET data = EXCLUDED.data
-            WHERE electric_local_rows.data IS DISTINCT FROM EXCLUDED.data`,
-         [modelName, incoming, primaryKey])
+            ON CONFLICT (model_name, row_id) DO UPDATE SET data = EXCLUDED.data, bigint_columns = EXCLUDED.bigint_columns
+            WHERE electric_local_rows.data IS DISTINCT FROM EXCLUDED.data
+               OR electric_local_rows.bigint_columns IS DISTINCT FROM EXCLUDED.bigint_columns`,
+         [modelName, incoming, primaryKey, types])
          const activeIds = rows.filter(row => !row.deleted).map(row => String(row[primaryKey]))
          await tx.query(`DELETE FROM electric_local_rows AS local
             WHERE local.model_name = $1 AND NOT (local.row_id = ANY($2::text[]))
@@ -394,16 +402,32 @@ function assertId(id) {
    }
 }
 
-function matchesWhere(row, where) {
+function bigintColumns(row) {
+   return Object.keys(row).filter(column => typeof row[column] === 'bigint')
+}
+
+function integerFilter(value) {
+   if (typeof value === 'bigint' || typeof value === 'number' && Number.isInteger(value)) return BigInt(value)
+   if (typeof value === 'string' && /^[+-]?[0-9]+$/.test(value.trim())) return BigInt(value.trim())
+   throw new TypeError('BIGINT filters require integer values')
+}
+
+function matchesWhere(row, where, bigintColumns) {
    return Object.entries(where).every(([key, constraint]) => {
       if (constraint === undefined) return true
       const value = row[key]
-      if (constraint instanceof Date) return value != null && new Date(value).getTime() === constraint.getTime()
+      if (constraint === null) return value === null
+      const integer = bigintColumns.has(key) && value != null
+      let numeric
+      if (integer) {
+         try { numeric = BigInt(value) } catch { return false }
+      }
+      if (constraint instanceof Date && !integer) return value != null && new Date(value).getTime() === constraint.getTime()
       if (constraint && typeof constraint === 'object' && !(constraint instanceof Date)) {
          if (value == null) return false
          return Object.entries(constraint).every(([operator, limit]) => {
-            const actual = limit instanceof Date ? new Date(value).getTime() : value
-            const bound = limit instanceof Date ? limit.getTime() : limit
+            const actual = integer ? numeric : limit instanceof Date ? new Date(value).getTime() : value
+            const bound = integer ? integerFilter(limit) : limit instanceof Date ? limit.getTime() : limit
             if (operator === 'gt') return actual > bound
             if (operator === 'gte') return actual >= bound
             if (operator === 'lt') return actual < bound
@@ -411,7 +435,7 @@ function matchesWhere(row, where) {
             throw new TypeError(`unsupported where constraint for '${key}'`)
          })
       }
-      return value === constraint
+      return integer ? numeric === integerFilter(constraint) : value === constraint
    })
 }
 

@@ -255,7 +255,7 @@ for (const staleFailure of [false, true]) {
          transaction: callback => db.transaction(callback),
          async query(sql, ...args) {
             const result = await db.query(sql, ...args)
-            if (hold && sql.startsWith('SELECT data FROM electric_local_rows')) {
+            if (hold && sql.startsWith('SELECT data') && sql.includes('FROM electric_local_rows')) {
                hold = false
                entered()
                await gate
@@ -531,6 +531,58 @@ test('offline writes stay local until the acknowledged Electric version arrives'
    } finally {
       await db.close()
    }
+})
+
+test('BIGINT filters stay numeric and lossless across snapshots, local edits, and reopen', async t => {
+   const db = new PGlite()
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('rows', { localDb: db, network: { onLine: false }, retryMs: 60_000 })
+   t.after(async () => { model.stop(); await model.waitForIdle(); await db.close() })
+   await model.prepare()
+   model.start()
+   const small = { uid: crypto.randomUUID(), quantity: 10n, code: '10', version: 1n, deleted: false }
+   const huge = { uid: crypto.randomUUID(), quantity: 9007199254740993n, code: '2', version: 2n, deleted: false }
+   const negative = { uid: crypto.randomUUID(), quantity: -3n, code: '3', version: 3n, deleted: false }
+   Shape.current.emit({ rows: [small, huge, negative] })
+   await model.waitForIdle()
+   const ids = async where => (await model.findMany(where)).map(row => row.uid).sort()
+   assert.deepEqual(await ids({ quantity: 10 }), [small.uid])
+   assert.deepEqual(await ids({ quantity: { gt: '2' } }), [small.uid, huge.uid].sort())
+   assert.deepEqual(await ids({ quantity: { gt: 9007199254740992n } }), [huge.uid])
+   assert.deepEqual(await ids({ quantity: '9007199254740993' }), [huge.uid])
+   assert.deepEqual(await ids({ quantity: { lt: '-2' } }), [negative.uid])
+   // A text field containing digits must retain PostgreSQL text ordering.
+   assert.deepEqual(await ids({ code: { gt: '2' } }), [negative.uid])
+   await assert.rejects(model.findMany({ quantity: { gt: '2.5' } }), /BIGINT filters require integer/)
+   await model.update(small.uid, { quantity: '12' })
+   assert.deepEqual(await ids({ quantity: 12n }), [small.uid])
+   const reopened = app.createElectricModel('rows', { localDb: db })
+   await reopened.prepare()
+   assert.equal((await reopened.findMany({ quantity: 12 }))[0].quantity, '12')
+   const created = await reopened.create({ quantity: 20n })
+   assert.equal((await reopened.findMany({ quantity: 20 }))[0].uid, created.uid)
+})
+
+test('preparing an older cache adds BIGINT type metadata without deleting rows', async t => {
+   const db = new PGlite()
+   let model
+   t.after(async () => { model?.stop(); await model?.waitForIdle(); await db.close() })
+   await db.exec(`CREATE TABLE electric_local_rows (
+      model_name TEXT NOT NULL, row_id TEXT NOT NULL, data JSONB NOT NULL,
+      PRIMARY KEY (model_name, row_id))`)
+   const row = { uid: crypto.randomUUID(), quantity: '10', version: '1', deleted: false }
+   await db.query('INSERT INTO electric_local_rows VALUES ($1, $2, $3)', ['rows', row.uid, row])
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   model = app.createElectricModel('rows', { localDb: db, network: { onLine: false }, retryMs: 60_000 })
+   await model.prepare()
+   assert.deepEqual(await model.findMany(), [row])
+   assert.deepEqual((await db.query('SELECT bigint_columns FROM electric_local_rows')).rows, [{ bigint_columns: [] }])
+   model.start()
+   Shape.current.emit({ rows: [{ ...row, quantity: 10n, version: 1n }] })
+   await model.waitForIdle()
+   assert.deepEqual(await model.findMany({ quantity: 10 }), [row])
 })
 
 test('large snapshots use three queries and preserve bigint versions and tombstones', async () => {

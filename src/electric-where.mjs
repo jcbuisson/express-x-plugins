@@ -19,7 +19,7 @@ function serializeValue(value, path) {
       if (Number.isNaN(value.getTime())) throw new TypeError(`${path} contains an invalid Date`)
       return value.toISOString()
    }
-   if (['string', 'number', 'boolean'].includes(typeof value) && value !== undefined) {
+   if (['string', 'number', 'bigint', 'boolean'].includes(typeof value) && value !== undefined) {
       if (typeof value === 'number' && !Number.isFinite(value)) {
          throw new TypeError(`${path} contains a non-finite number`)
       }

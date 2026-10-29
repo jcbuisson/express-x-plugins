@@ -70,6 +70,9 @@ test('failed Shape reads reject instead of resolving with empty rows', async () 
 })
 
 test('translates where objects into parameterized Electric filters', () => {
+   assert.deepEqual(whereToElectricParams({ quantity: { gt: 9007199254740992n } }), {
+      where: '"quantity" > $1', params: ['9007199254740992'],
+   })
    assert.deepEqual(whereToElectricParams({ completed: false, priority: { gte: 2, lt: 5 }, owner: null }), {
       where: '"completed" = $1 AND "priority" >= $2 AND "priority" < $3 AND "owner" IS NULL',
       params: ['false', '2', '5'],

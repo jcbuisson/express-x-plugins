@@ -188,9 +188,11 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
    if (typeof id !== 'string' || !UUID.test(id)) throw new TypeError('sync id must be a UUID')
    if (action !== 'delete') assertPlainObject(data, 'mutation data')
    if (data && ('version' in data || 'deleted' in data)) throw new TypeError('version and deleted are managed by sync')
+
    return withTransaction(db, async tx => {
       await relations.lock(tx, model)
-      const key = [model.table, clientId, String(id)]
+      const key = [model.table, clientId, id]
+
       await tx.query(`INSERT INTO electric_mutation_cursor (table_name, client_id, row_id)
          VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, key)
       const { rows } = await tx.query(`SELECT revision, result FROM electric_mutation_cursor
@@ -203,8 +205,10 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
          && Object.entries(data).some(([column, value]) => column !== model.primaryKey && value !== undefined)
       let result
       const rejection = await relations.deletedParent(tx, model, action, id, data, editedCreate)
+
       if (rejection) {
          result = { ...await writeTombstone(tx, model, id), syncRejection: rejection }
+
       } else if (action === 'create' && !editedCreate) {
          const entries = Object.entries({ ...data, [model.primaryKey]: id }).filter(([, value]) => value !== undefined)
          const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
@@ -214,14 +218,17 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
             ON CONFLICT (${model.quotedPrimaryKey}) DO UPDATE SET ${model.quotedPrimaryKey} = EXCLUDED.${model.quotedPrimaryKey}
             RETURNING *`, values)
          result = inserted.rows[0]
+
       } else if (action === 'update' || editedCreate) {
          const set = buildSet(data, model.primaryKey)
          const updated = await tx.query(`UPDATE ${model.quotedTable} SET ${set.sql}, version = nextval('electric_sync_version_seq')
             WHERE ${model.quotedPrimaryKey} = $${set.values.length + 1} AND NOT deleted RETURNING *`, [...set.values, id])
          result = updated.rows[0] ?? await writeTombstone(tx, model, id)
+
       } else {
          result = await writeTombstone(tx, model, id)
       }
+
       if (result?.deleted) await relations.cascade(tx, model, id, writeTombstone)
       await tx.query(`UPDATE electric_mutation_cursor SET revision = $4, result = $5::jsonb
          WHERE table_name = $1 AND client_id = $2 AND row_id = $3`, [...key, String(revision), JSON.stringify(result ?? null)])
@@ -247,7 +254,7 @@ async function writeTombstone(tx, model, id) {
 
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
 
 function quoteIdentifier(value, label) {

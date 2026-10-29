@@ -1,5 +1,6 @@
-// PostgreSQL foreign keys remain satisfied by soft-deleted rows. Mirror CASCADE
-// relationships at the sync boundary, where deletions must produce tombstones.
+
+// PostgreSQL foreign keys remain satisfied by soft-deleted rows
+// Mirror CASCADE relationships at the sync boundary, where deletions must produce tombstones.
 export async function discoverSyncRelations(db, models) {
    const { rows } = await db.query(`SELECT child.table_name AS child_table, parent.table_name AS parent_table,
       ARRAY(SELECT attname::text FROM unnest(fk.conkey) WITH ORDINALITY AS key(attnum, position)

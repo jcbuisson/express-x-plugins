@@ -6,6 +6,8 @@ import { electricClientPlugin } from '../src/electric-client-plugin.mjs'
 import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
 class Stream {
+   static current
+   constructor(options) { this.options = options; Stream.current = this }
    subscribe() { return () => {} }
    isConnected() { return true }
    unsubscribeAll() {}
@@ -348,6 +350,7 @@ test('stop ends an explicit flush after its current request and idle waits for i
    await Promise.resolve()
    assert.equal(idle, false)
    model.stop()
+   assert.equal(Stream.current.options.signal.aborted, true)
    release()
    await flush
    await drained
@@ -355,6 +358,7 @@ test('stop ends an explicit flush after its current request and idle waits for i
    const pending = await db.query('SELECT row_id FROM electric_mutation_queue WHERE acknowledged_version IS NULL')
    assert.deepEqual(pending.rows, [{ row_id: second.uid }])
    model.start()
+   assert.equal(Stream.current.options.signal.aborted, false)
    await model.waitForIdle()
    assert.deepEqual(calls, [first.uid, second.uid])
 })

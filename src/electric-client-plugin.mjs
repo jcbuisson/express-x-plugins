@@ -4,6 +4,7 @@ import { Observable, firstValueFrom, Subject, takeUntil } from 'rxjs'
 import { getCurrentScope, onScopeDispose } from 'vue'
 import { createOfflineElectricModel } from './electric-offline-model.mjs'
 import { createManagedSync } from './electric-managed-sync.mjs'
+import { streamAbort } from './electric-stream-abort.mjs'
 
 /**
  * Add Electric-backed reactive models to an Express-X client.
@@ -68,8 +69,10 @@ export function electricClientPlugin(app, options = {}) {
          // Validate eagerly
          const filterParams = whereToElectricParams(where)
          return new ObservableClass(subscriber => {
+            const cancellation = streamAbort(streamOptions.signal)
             const stream = new ShapeStreamClass({
                ...streamOptions,
+               signal: cancellation.signal,
                url,
                params: { ...streamOptions.params, ...filterParams },
             })
@@ -84,7 +87,11 @@ export function electricClientPlugin(app, options = {}) {
             })
             // Shape exposes errors as state. ShapeStream retries transient failures;
             // callers keep one observable subscription across reconnects
-            return () => unsubscribe()
+            return () => {
+               unsubscribe()
+               stream.unsubscribeAll?.()
+               cancellation.abort()
+            }
          })
       }
 

@@ -90,6 +90,29 @@ test('findMany resolves with the first Shape rows and cleans up its subscription
       where: '"completed" = $1', params: ['false'],
    })
    assert.equal(stream.shape.unsubscribed, true)
+   assert.equal(stream.options.signal.aborted, true)
+})
+
+test('shared queries cancel their request only after the last subscriber and preserve caller cancellation', () => {
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: DeferredShape })
+   const external = new AbortController()
+   const model = app.createElectricModel('todos', { streamOptions: { signal: external.signal } })
+   const first = model.getObservable().subscribe()
+   const second = model.getObservable().subscribe()
+   const stream = FakeStream.instances.at(-1)
+   first.unsubscribe()
+   assert.equal(stream.options.signal.aborted, false)
+   second.unsubscribe()
+   assert.equal(stream.options.signal.aborted, true)
+   assert.equal(external.signal.aborted, false)
+   const next = model.getObservable().subscribe()
+   const restarted = FakeStream.instances.at(-1)
+   assert.equal(restarted.options.signal.aborted, false)
+   external.abort('caller stopped')
+   assert.equal(restarted.options.signal.aborted, true)
+   assert.equal(restarted.options.signal.reason, 'caller stopped')
+   next.unsubscribe()
 })
 
 test('findMany unsubscribes when its Vue scope is disposed before a result', async () => {

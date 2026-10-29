@@ -1,5 +1,6 @@
 import { shareQueryObservables } from './electric-query-observable.mjs'
 import { Observable } from 'rxjs'
+import { streamAbort } from './electric-stream-abort.mjs'
 
 /** Offline model backed by a shared PGlite database (normally PGliteWorker). */
 export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs, streamOptions = {}, onError }) {
@@ -13,6 +14,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    let connected = false
    let timer
    let stream
+   let cancellation
    let streamGeneration = 0
    let lastError = null
    const pendingBackground = new Set()
@@ -283,7 +285,8 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       globalThis.addEventListener?.('online', online)
       if (!ownsSync) { channel?.postMessage({ modelName, requestStatus: true }); return }
       const generation = ++streamGeneration
-      stream = new ShapeStreamClass({ ...streamOptions, url })
+      cancellation = streamAbort(streamOptions.signal)
+      stream = new ShapeStreamClass({ ...streamOptions, signal: cancellation.signal, url })
       stream.subscribe(messages => {
          if (generation !== streamGeneration) return
          if (messages.some(message => message.headers?.control === 'must-refetch')) background(resetSnapshot())
@@ -320,6 +323,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       background(resetSnapshot())
       clearInterval(timer)
       stream?.unsubscribeAll()
+      cancellation?.abort()
       channel?.removeEventListener('message', sharedChange)
       globalThis.removeEventListener?.('online', online)
       connected = false

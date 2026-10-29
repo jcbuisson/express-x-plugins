@@ -156,7 +156,8 @@ Additional transition guards and actions:
 - A transient failure leaves the entry Pending and ends the current flush loop.
   A later trigger retries it. A permanent failure marks the matching revision
   Failed and permits the loop to continue with other entries.
-- Missing-parent failures defer that row while later entries are attempted.
+- Missing-parent failures, including PostgreSQL foreign-key violations (`23503`),
+  defer that row while later entries are attempted.
   Successful writes make deferred rows eligible again in the same flush, so
   reverse-ordered parent/child creations can finish. A pass without progress
   ends the flush and leaves unresolved rows Pending.

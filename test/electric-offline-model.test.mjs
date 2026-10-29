@@ -210,35 +210,37 @@ test('offline filters validate empty caches and match SQL null and Date behavior
    assert.deepEqual((await model.findMany({ date: { gt: before, lt: after } })).map(row => row.uid), [matching.uid])
 })
 
-test('a flush resolves reverse-ordered same-model parents without spinning on missing parents', async t => {
-   const { app, local, server, services } = await syncFixture(t,
-      'CREATE TABLE nodes (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES nodes(uid) ON DELETE CASCADE)',
-      [{ name: 'nodes', tombstoneData: { parent_uid: null } }])
-   const service = services.get('nodes')
-   let calls = 0
-   const create = service.create
-   service.create = async (...args) => { calls++; return create(...args) }
-   const model = app.createElectricModel('nodes', { localDb: local })
-   await model.prepare()
-   const root = crypto.randomUUID()
-   const middle = crypto.randomUUID()
-   await model.create({ parent_uid: middle })
-   await model.create({ uid: middle, parent_uid: root })
-   await model.create({ uid: root, parent_uid: null })
-   await model.flushQueue()
-   assert.equal((await server.query('SELECT * FROM nodes WHERE NOT deleted')).rows.length, 3)
-   assert.equal((await local.query('SELECT * FROM electric_mutation_queue WHERE acknowledged_version IS NULL')).rows.length, 0)
+for (const onDelete of ['', 'ON DELETE CASCADE']) {
+   test(`a flush resolves reverse-ordered parents with ${onDelete || 'default foreign-key behavior'}`,  async t => {
+      const { app, local, server, services } = await syncFixture(t,
+         `CREATE TABLE nodes (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES nodes(uid) ${onDelete})`,
+         [{ name: 'nodes', tombstoneData: { parent_uid: null } }])
+      const service = services.get('nodes')
+      let calls = 0
+      const create = service.create
+      service.create = async (...args) => { calls++; return create(...args) }
+      const model = app.createElectricModel('nodes', { localDb: local })
+      await model.prepare()
+      const root = crypto.randomUUID()
+      const middle = crypto.randomUUID()
+      await model.create({ parent_uid: middle })
+      await model.create({ uid: middle, parent_uid: root })
+      await model.create({ uid: root, parent_uid: null })
+      await model.flushQueue()
+      assert.equal((await server.query('SELECT * FROM nodes WHERE NOT deleted')).rows.length, 3)
+      assert.equal((await local.query('SELECT * FROM electric_mutation_queue WHERE acknowledged_version IS NULL')).rows.length, 0)
 
-   const orphan = await model.create({ parent_uid: crypto.randomUUID() })
-   const before = calls
-   await model.flushQueue()
-   assert.equal(calls, before + 1)
-   await model.flushQueue()
-   assert.equal(calls, before + 2)
-   const queued = (await local.query('SELECT * FROM electric_mutation_queue WHERE row_id = $1', [orphan.uid])).rows[0]
-   assert.equal(queued.status, 'pending')
-   assert.equal(queued.acknowledged_version, null)
-})
+      const orphan = await model.create({ parent_uid: crypto.randomUUID() })
+      const before = calls
+      await model.flushQueue()
+      assert.equal(calls, before + 1)
+      await model.flushQueue()
+      assert.equal(calls, before + 2)
+      const queued = (await local.query('SELECT * FROM electric_mutation_queue WHERE row_id = $1', [orphan.uid])).rows[0]
+      assert.equal(queued.status, 'pending')
+      assert.equal(queued.acknowledged_version, null)
+   })
+}
 
 test('constraint failures do not block valid writes and an edit can retry a failed row', async t => {
    const { app, local, server, services } = await syncFixture(t,

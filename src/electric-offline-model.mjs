@@ -224,7 +224,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             else lastError = null
          } catch (error) {
             report(error)
-            if (error?.code === 'sync-parent-missing') {
+            if (error?.code === 'sync-parent-missing' || error?.code === '23503') {
                deferred.add(mutation.row_id)
                continue
             }

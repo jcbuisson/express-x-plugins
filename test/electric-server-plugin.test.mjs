@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { EventEmitter } from 'node:events'
 
 import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
@@ -141,6 +142,30 @@ test('shape proxy pins the configured table and keeps credentials server-side', 
    assert.equal(fetched.searchParams.get('secret'), 'secret')
    assert.equal(response.statusCode, 200)
    assert.equal(response.headers['electric-handle'], 'abc')
+})
+
+test('closing a shape response cancels its upstream long poll and removes its listener', async () => {
+   let entered
+   let signal
+   const fetching = new Promise(resolve => { entered = resolve })
+   const { routes } = fixture({ fetch(_url, options) {
+      signal = options.signal
+      entered()
+      return new Promise((_resolve, reject) => {
+         signal.addEventListener('abort', () => reject(new DOMException('disconnected', 'AbortError')), { once: true })
+      })
+   } })
+   const response = new EventEmitter()
+   let failure
+   const handling = routes.get('/electric/v1/shape/:model')({
+      params: { model: 'todos' }, query: {}, get: () => undefined,
+   }, response, error => { failure = error })
+   await fetching
+   response.emit('close')
+   await handling
+   assert.equal(signal.aborted, true)
+   assert.equal(failure.name, 'AbortError')
+   assert.equal(response.listenerCount('close'), 0)
 })
 
 test('rejects unsafe SQL identifiers', () => {

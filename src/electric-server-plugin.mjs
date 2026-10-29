@@ -148,10 +148,17 @@ export function electricServerPlugin(app, db, models, options = {}) {
          target.searchParams.set('table', model.table)
          if (options.sourceId) target.searchParams.set('source_id', options.sourceId)
          if (options.sourceSecret) target.searchParams.set('secret', options.sourceSecret)
-         const upstream = await fetchImpl(target, { headers: { accept: request.get('accept') ?? '*/*' } })
-         response.status(upstream.status)
-         copyResponseHeaders(upstream, response)
-         response.send(Buffer.from(await upstream.arrayBuffer()))
+         const controller = new AbortController()
+         const abort = () => controller.abort()
+         response.on?.('close', abort)
+         try {
+            const upstream = await fetchImpl(target, { signal: controller.signal, headers: { accept: request.get('accept') ?? '*/*' } })
+            response.status(upstream.status)
+            copyResponseHeaders(upstream, response)
+            response.send(Buffer.from(await upstream.arrayBuffer()))
+         } finally {
+            response.off?.('close', abort)
+         }
       } catch (error) {
          next(error)
       }

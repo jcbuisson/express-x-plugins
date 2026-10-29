@@ -55,6 +55,33 @@ async function fixture(t) {
    return { db, services, metadata, user, group }
 }
 
+test('table aliases share cascade deletion and deleted-parent validation', async t => {
+   const db = new PGlite()
+   t.after(() => db.close())
+   await db.exec(`CREATE TABLE parents (uid UUID PRIMARY KEY);
+      CREATE TABLE children (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES parents(uid) ON DELETE CASCADE)`)
+   const models = [
+      { name: 'parent', table: 'parents' }, { name: 'parent_alias', table: 'parents' },
+      { name: 'child', table: 'children', tombstoneData: { parent_uid: null } },
+      { name: 'child_alias', table: 'children', tombstoneData: { parent_uid: null } },
+   ]
+   await prepareElectricSyncSchema(db, models)
+   const services = new Map()
+   electricServerPlugin({ createService(name, service) { services.set(name, service) }, get() {} }, poolFor(db), models, { sync: true })
+   const metadata = () => ({ clientId: crypto.randomUUID(), revision: '1' })
+   const parent = crypto.randomUUID()
+   const child = crypto.randomUUID()
+   await services.get('parent').create(parent, {}, metadata())
+   await services.get('child').create(child, { parent_uid: parent }, metadata())
+   await services.get('parent').delete(parent, metadata())
+   const row = (await db.query('SELECT * FROM children WHERE uid = $1', [child])).rows[0]
+   assert.equal(row.deleted, true)
+   assert.equal(row.parent_uid, null)
+   const rejected = await services.get('child').create(crypto.randomUUID(), { parent_uid: parent }, metadata())
+   assert.equal(rejected.deleted, true)
+   assert.equal(rejected.syncRejection.code, 'sync-parent-deleted')
+})
+
 test('membership committed before an offline group delete is cascaded, including descendants', async t => {
    const { db, services, metadata, user, group } = await fixture(t)
    const membership = crypto.randomUUID()

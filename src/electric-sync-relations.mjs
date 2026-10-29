@@ -10,7 +10,7 @@ export async function discoverSyncRelations(db, models) {
       FROM pg_constraint AS fk
       JOIN unnest($1::text[]) AS child(table_name) ON fk.conrelid = to_regclass(child.table_name)
       JOIN unnest($1::text[]) AS parent(table_name) ON fk.confrelid = to_regclass(parent.table_name)
-      WHERE fk.contype = 'f' AND fk.confdeltype = 'c'`, [models.map(model => model.quotedTable)])
+      WHERE fk.contype = 'f' AND fk.confdeltype = 'c'`, [[...new Set(models.map(model => model.quotedTable))]])
    const byTable = new Map(models.map(model => [model.quotedTable, model]))
    const relations = rows.map(row => {
       const child = byTable.get(row.child_table)
@@ -22,10 +22,10 @@ export async function discoverSyncRelations(db, models) {
       const column = row.child_columns[0]
       return { child, parent, column, quotedColumn: `"${column.replaceAll('"', '""')}"` }
    })
-   const members = new Set(relations.flatMap(({ child, parent }) => [child, parent]))
+   const members = new Set(relations.flatMap(({ child, parent }) => [child.table, parent.table]))
 
    async function lock(tx, model) {
-      if (!members.size || model && !members.has(model)) return
+      if (!members.size || model && !members.has(model.table)) return
       // One transaction-scoped lock, acquired before any cursor/row locks. This
       // serializes relational mutations across processes and handles cyclic
       // graphs without lock-order inversions. Unrelated models remain parallel.
@@ -33,7 +33,7 @@ export async function discoverSyncRelations(db, models) {
    }
 
    async function deletedParent(tx, model, action, id, data, editedCreate) {
-      const parents = relations.filter(relation => relation.child === model)
+      const parents = relations.filter(relation => relation.child.table === model.table)
       if (action === 'delete' || !parents.length) return null
       const { rows } = await tx.query(`SELECT * FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 FOR UPDATE`, [id])
       const current = rows[0]
@@ -70,7 +70,7 @@ export async function discoverSyncRelations(db, models) {
       const key = JSON.stringify([model.table, id])
       if (visited.has(key)) return
       visited.add(key)
-      for (const relation of relations.filter(relation => relation.parent === model)) {
+      for (const relation of relations.filter(relation => relation.parent.table === model.table)) {
          const { child } = relation
          const { rows } = await tx.query(`SELECT ${child.quotedPrimaryKey} FROM ${child.quotedTable}
             WHERE ${relation.quotedColumn} = $1 AND NOT deleted ORDER BY ${child.quotedPrimaryKey} FOR UPDATE`, [id])

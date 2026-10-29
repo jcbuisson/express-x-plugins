@@ -63,6 +63,9 @@ test('PostgreSQL serializes concurrent membership writes and soft deletes across
       { name: 'user', table: 'people' },
       { name: 'group', table: 'groups' },
       { name: 'membership', tombstoneData: { user_uid: null, group_uid: null } },
+      { name: 'user_alias', table: 'people' },
+      { name: 'group_alias', table: 'groups' },
+      { name: 'membership_alias', table: 'membership', tombstoneData: { user_uid: null, group_uid: null } },
    ]
    await prepareElectricSyncSchema(pool, models)
    const services = register(pool, models)

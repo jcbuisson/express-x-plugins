@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { PGlite } from '@electric-sql/pglite'
 import { createClient } from '@jcbuisson/express-x/client'
+import { FetchError, Shape as ElectricShape } from '@electric-sql/client'
 import { electricClientPlugin } from '../src/electric-client-plugin.mjs'
 import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
@@ -406,6 +407,27 @@ test('network TypeErrors keep queued mutations retryable', async t => {
    await model.flushQueue()
    assert.deepEqual(calls, [first.uid, first.uid, second.uid])
    assert.equal((await db.query('SELECT count(*)::int AS count FROM electric_mutation_queue WHERE acknowledged_version IS NULL')).rows[0].count, 0)
+})
+
+test('a Shape error cannot erase an existing offline cache or mark it connected', async t => {
+   const db = new PGlite()
+   class ErrorStream extends Stream {
+      listeners = []
+      subscribe(_messages, onError) { this.listeners.push(onError); return () => {} }
+      fail(error) { for (const callback of this.listeners) callback?.(error) }
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: ErrorStream, Shape: ElectricShape })
+   const model = app.createElectricModel('todos', { localDb: db, retryMs: 60_000 })
+   t.after(async () => { model.stop(); await model.waitForIdle(); await db.close() })
+   await model.prepare()
+   const cached = { uid: crypto.randomUUID(), title: 'saved offline', version: '1', deleted: false }
+   await db.query('INSERT INTO electric_local_rows (model_name, row_id, data) VALUES ($1, $2, $3)', ['todos', cached.uid, cached])
+   model.start()
+   Stream.current.fail(new FetchError(503, 'unavailable', undefined, {}, 'http://localhost/shape'))
+   await model.waitForIdle()
+   assert.deepEqual(await model.findMany(), [cached])
+   assert.equal((await model.getStatus()).online, false)
 })
 
 test('offline writes stay local until the acknowledged Electric version arrives', async () => {

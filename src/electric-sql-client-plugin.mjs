@@ -48,6 +48,7 @@ export function electricSqlClientPlugin(app, options = {}) {
       const shape = new LiveShape(stream)
       const unsubscribe = shape.subscribe(({ rows }) => {
          if (stopped) return
+         if (shape.error) { report(shape.error); return }
          received = true
          const current = [...rows]
          if (database) {

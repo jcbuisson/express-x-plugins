@@ -81,6 +81,7 @@ export function electricClientPlugin(app, options = {}) {
             const shape = new ShapeClass(stream)
             let previous
             const unsubscribe = shape.subscribe(({ rows }) => {
+               if (shape.error) { subscriber.error(shape.error); return }
                const current = [...rows]
                const serialized = JSON.stringify(current, (_key, value) => typeof value === 'bigint' ? String(value) : value)
                if (serialized === previous) return

@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { FetchError, Shape as ElectricShape } from '@electric-sql/client'
 import { electricSqlServerPlugin } from '../src/electric-sql-server-plugin.mjs'
 import { electricSqlClientPlugin } from '../src/electric-sql-client-plugin.mjs'
 
@@ -72,6 +73,41 @@ test('client binds SQL filters and stops network work on unsubscribe or disposal
    assert.throws(() => app.sql.watch('todos', { params: [null] }, () => {}), /IS NULL/)
    await app.sql.dispose()
    assert.ok(streams[1].options.signal.aborted)
+})
+
+test('Shape errors never replace persistent SQL snapshots with empty results', async () => {
+   const streams = []
+   class Stream {
+      constructor() { streams.push(this) }
+      subscribe(_callback, onError) { this.fail = onError; return () => {} }
+      unsubscribeAll() {}
+   }
+   class Shape {
+      constructor(stream) { this.stream = stream }
+      subscribe(callback) { this.stream.emit = callback; return () => {} }
+   }
+   const databaseName = `sql-error-${crypto.randomUUID()}`
+   const errors = []
+   function client(LiveShape) {
+      const app = { service: () => ({}) }
+      electricSqlClientPlugin(app, { databaseName, ShapeStream: Stream, Shape: LiveShape, onError: error => errors.push(error) })
+      return app.sql
+   }
+   const first = client(Shape)
+   first.watch('todos', () => {})
+   streams.at(-1).emit({ rows: [{ id: 1, title: 'cached' }] })
+   await first.dispose()
+   const second = client(ElectricShape)
+   const observed = []
+   await new Promise(resolve => second.watch('todos', rows => { observed.push(rows); resolve() }))
+   streams.at(-1).fail(new FetchError(503, 'unavailable', undefined, {}, 'http://localhost/shape'))
+   await second.dispose()
+   assert.deepEqual(observed, [[{ id: 1, title: 'cached' }]])
+   assert.equal(errors.length, 1)
+   const third = client(Shape)
+   assert.deepEqual(await new Promise(resolve => third.watch('todos', resolve)), [{ id: 1, title: 'cached' }])
+   await third.clearLocalData()
+   await third.dispose()
 })
 
 test('persistent watches restore filtered snapshots after disposal, including empty results', async () => {

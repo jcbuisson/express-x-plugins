@@ -300,7 +300,16 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          notify()
       }, error => { if (generation !== streamGeneration) return; connected = false; report(error) })
       const shape = new ShapeClass(stream)
-      shape.subscribe(({ rows }) => { if (generation !== streamGeneration) return; connected = true; background(applySnapshot([...rows])) })
+      shape.subscribe(({ rows }) => {
+         if (generation !== streamGeneration) return
+         if (shape.error) {
+            connected = false
+            if (lastError !== shape.error.message) report(shape.error)
+            return
+         }
+         connected = true
+         background(applySnapshot([...rows]))
+      })
       timer = setInterval(() => { background(flushQueue()) }, retryMs)
       background(flushQueue())
    }

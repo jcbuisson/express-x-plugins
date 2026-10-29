@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { effectScope, isRef } from 'vue'
+import { FetchError } from '@electric-sql/client'
 
 import {
    DisposableShape,
@@ -51,6 +52,21 @@ test('DisposableShape tears down its stream with its last subscriber', () => {
    unsubscribe()
 
    assert.equal(stream.unsubscribed, true)
+})
+
+test('failed Shape reads reject instead of resolving with empty rows', async () => {
+   class ErrorStream extends FakeStream {
+      subscribe(_messages, onError) { this.fail = onError; return () => {} }
+      unsubscribeAll() {}
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: ErrorStream })
+   const result = app.createElectricModel('todos').findMany()
+   const rejected = assert.rejects(result, error => error.status === 401)
+   const stream = FakeStream.instances.at(-1)
+   stream.fail(new FetchError(401, 'unauthorized', undefined, {}, 'http://localhost/shape'))
+   await rejected
+   assert.equal(stream.options.signal.aborted, true)
 })
 
 test('translates where objects into parameterized Electric filters', () => {

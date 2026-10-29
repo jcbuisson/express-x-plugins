@@ -86,7 +86,10 @@ stateDiagram-v2
 Actual reconnection/retry mechanics belong to `ShapeStream`. This wrapper marks
 its connection false on a stream error and reports the error; it does not create
 a fresh stream solely because an error occurred. Generation guards ignore late
-callbacks from stopped streams. A `must-refetch` message resets the cached
+callbacks from stopped streams. A Shape error notification is not a snapshot:
+it preserves cached rows and leaves the connection offline. Direct streamed
+queries reject on Shape errors instead of reporting an empty successful result.
+A `must-refetch` message resets the cached
 snapshot; the connection flag is still independently taken from the stream.
 
 Queue uploads are gated by ownership and browser network state, **not** by the

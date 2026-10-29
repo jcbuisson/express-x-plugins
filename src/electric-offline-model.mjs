@@ -8,7 +8,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    streamOptions = { ...streamOptions, params: { ...streamOptions.params } }
    let snapshot = null
    let operation = Promise.resolve()
-   let flushing = false
+   let flushPromise
    let started = false
    let connected = false
    let timer
@@ -193,43 +193,45 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       notify()
    }
 
-   async function flushQueue() {
-      if (!ownsSync || flushing || network?.onLine === false) return
-      flushing = true
-      try {
-         const deferred = new Set()
-         while (ownsSync) {
-            const { rows } = await retryLeader(() => db.query(`SELECT * FROM electric_mutation_queue
-               WHERE model_name = $1 AND status = 'pending' AND acknowledged_version IS NULL
-                 AND NOT (row_id = ANY($2::text[]))
-               ORDER BY revision LIMIT 1`, [modelName, [...deferred]]))
-            const mutation = rows[0]
-            if (!mutation) break
-            try {
-               const rejection = await sendMutation(mutation)
-               deferred.clear()
-               if (rejection) report(rejection)
-               else lastError = null
-            } catch (error) {
-               report(error)
-               if (error?.code === 'sync-parent-missing') {
-                  deferred.add(mutation.row_id)
-                  continue
-               }
-               if (!isPermanent(error)) break
-               await db.query(`UPDATE electric_mutation_queue SET status = 'failed', failure_reason = $3
-                  WHERE model_name = $1 AND row_id = $2 AND revision = $4`,
-               [modelName, mutation.row_id, error.message, mutation.revision])
-               notify()
+   function flushQueue() {
+      if (flushPromise) return flushPromise
+      if (!ownsSync || network?.onLine === false) return Promise.resolve()
+      flushPromise = runFlush(streamGeneration).finally(() => { flushPromise = undefined })
+      return flushPromise
+   }
+
+   async function runFlush(generation) {
+      const deferred = new Set()
+      while (ownsSync && generation === streamGeneration) {
+         const { rows } = await retryLeader(() => db.query(`SELECT * FROM electric_mutation_queue
+            WHERE model_name = $1 AND status = 'pending' AND acknowledged_version IS NULL
+              AND NOT (row_id = ANY($2::text[]))
+            ORDER BY revision LIMIT 1`, [modelName, [...deferred]]))
+         const mutation = rows[0]
+         if (!mutation || !ownsSync || generation !== streamGeneration) break
+         try {
+            const rejection = await sendMutation(mutation, generation)
+            deferred.clear()
+            if (rejection) report(rejection)
+            else lastError = null
+         } catch (error) {
+            report(error)
+            if (error?.code === 'sync-parent-missing') {
+               deferred.add(mutation.row_id)
+               continue
             }
+            if (!isPermanent(error)) break
+            await db.query(`UPDATE electric_mutation_queue SET status = 'failed', failure_reason = $3
+               WHERE model_name = $1 AND row_id = $2 AND revision = $4`,
+            [modelName, mutation.row_id, error.message, mutation.revision])
+            notify()
          }
-      } finally {
-         flushing = false
       }
    }
 
-   async function sendMutation(mutation) {
+   async function sendMutation(mutation, generation) {
       const client = await retryLeader(() => db.query('SELECT id FROM electric_sync_client WHERE singleton = true'))
+      if (!ownsSync || generation !== streamGeneration) return
       const metadata = { clientId: client.rows[0].id, revision: String(mutation.revision) }
       const { row_id: id, data, action } = mutation
       const result = action === 'create'
@@ -303,7 +305,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    async function waitForIdle() {
-      while (pendingBackground.size) await Promise.allSettled([...pendingBackground])
+      while (pendingBackground.size || flushPromise) {
+         await Promise.allSettled([...pendingBackground, ...(flushPromise ? [flushPromise] : [])])
+      }
       await operation
    }
 

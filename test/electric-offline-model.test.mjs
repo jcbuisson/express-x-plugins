@@ -319,6 +319,46 @@ test('an edited colliding create with a lost rejection never overwrites the exis
    assert.equal((await server.query('SELECT * FROM electric_mutation_cursor')).rows.length, 1)
 })
 
+test('stop ends an explicit flush after its current request and idle waits for its acknowledgement', async t => {
+   const db = new PGlite()
+   let release
+   let entered
+   const gate = new Promise(resolve => { release = resolve })
+   const sending = new Promise(resolve => { entered = resolve })
+   const calls = []
+   const app = { service: () => ({ async create(id, data) {
+      calls.push(id)
+      if (calls.length === 1) { entered(); await gate }
+      return { uid: id, ...data, version: String(calls.length) }
+   } }) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const network = { onLine: false }
+   const model = app.createElectricModel('todos', { localDb: db, network, retryMs: 60_000 })
+   t.after(async () => { release(); model.stop(); await model.waitForIdle(); await db.close() })
+   await model.prepare()
+   const first = await model.create({ title: 'first' })
+   const second = await model.create({ title: 'second' })
+   model.start()
+   network.onLine = true
+   const flush = model.flushQueue()
+   await sending
+   assert.equal(model.flushQueue(), flush)
+   let idle = false
+   const drained = model.waitForIdle().then(() => { idle = true })
+   await Promise.resolve()
+   assert.equal(idle, false)
+   model.stop()
+   release()
+   await flush
+   await drained
+   assert.deepEqual(calls, [first.uid])
+   const pending = await db.query('SELECT row_id FROM electric_mutation_queue WHERE acknowledged_version IS NULL')
+   assert.deepEqual(pending.rows, [{ row_id: second.uid }])
+   model.start()
+   await model.waitForIdle()
+   assert.deepEqual(calls, [first.uid, second.uid])
+})
+
 test('offline writes stay local until the acknowledged Electric version arrives', async () => {
    const db = new PGlite()
    const calls = []

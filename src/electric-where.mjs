@@ -58,4 +58,3 @@ export function whereToElectricParams(where = {}) {
 
    return clauses.length ? { where: clauses.join(' AND '), params } : {}
 }
-

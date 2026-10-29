@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
+import { PGlite } from '@electric-sql/pglite'
 
 import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
@@ -213,6 +214,35 @@ test('sync mode commits a versioned write and rejects replayed or stale revision
    assert.equal(inserts, 1)
    assert.equal(queries.filter(({ sql }) => sql === 'COMMIT').length, 3)
    await assert.rejects(service.create.call({}, id, { title: 'bad' }), /metadata is required/)
+})
+
+test('native BIGINT mutation values and versions remain JSON-safe and replayable', async t => {
+   const pg = new PGlite()
+   t.after(() => pg.close())
+   await pg.exec('CREATE TABLE todos (uid UUID PRIMARY KEY, quantity BIGINT, created_at TIMESTAMPTZ DEFAULT now())')
+   await prepareElectricSyncSchema(pg, ['todos'])
+   const pool = { query: (...args) => pg.query(...args), async connect() {
+      return { query: (...args) => pg.query(...args), release() {} }
+   } }
+   let service
+   electricServerPlugin({ createService(_name, methods) { service = methods }, get() {} }, pool, ['todos'], { sync: true })
+   const id = crypto.randomUUID()
+   const clientId = crypto.randomUUID()
+   const metadata = { clientId, revision: '1' }
+   const result = await service.create(id, { quantity: '9007199254740993' }, metadata)
+   assert.equal(result.quantity, '9007199254740993')
+   assert.ok(result.created_at instanceof Date)
+   assert.deepEqual(JSON.parse(JSON.stringify(await service.create(id, { quantity: '9007199254740993' }, metadata))), JSON.parse(JSON.stringify(result)))
+   await pg.query("SELECT setval('electric_sync_version_seq', 9007199254740992)")
+   const updated = await service.update(id, { quantity: '9007199254740995' }, { clientId, revision: '2' })
+   assert.equal(updated.quantity, '9007199254740995')
+   assert.equal(updated.version, '9007199254740993')
+   assert.doesNotThrow(() => JSON.stringify(updated))
+   const deleted = await service.delete(id, { clientId, revision: '3' })
+   assert.equal(deleted.deleted, true)
+   assert.equal(typeof deleted.version, 'string')
+   assert.ok(BigInt(deleted.version) > BigInt(updated.version))
+   assert.deepEqual(JSON.parse(JSON.stringify(await service.delete(id, { clientId, revision: '3' }))), JSON.parse(JSON.stringify(deleted)))
 })
 
 test('sync schema prepares version and tombstone columns', async () => {

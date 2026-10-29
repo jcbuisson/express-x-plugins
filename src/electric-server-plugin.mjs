@@ -246,6 +246,7 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
       }
 
       if (result?.deleted) await relations.cascade(tx, model, id, writeTombstone)
+      result = normalizeBigInts(result)
       await tx.query(`UPDATE electric_mutation_cursor SET revision = $4, result = $5::jsonb
          WHERE table_name = $1 AND client_id = $2 AND row_id = $3`, [...key, String(revision), JSON.stringify(result ?? null)])
       return result
@@ -272,6 +273,18 @@ async function writeTombstone(tx, model, id) {
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
+
+function normalizeBigInts(value) {
+   if (typeof value === 'bigint') return String(value)
+   if (Array.isArray(value)) return value.map(normalizeBigInts)
+   if (value && typeof value === 'object') {
+      const prototype = Object.getPrototypeOf(value)
+      if (prototype === Object.prototype || prototype === null) {
+         return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalizeBigInts(item)]))
+      }
+   }
+   return value
+}
 
 function invalidArgument(message) {
    return Object.assign(new TypeError(message), { code: 'invalid-argument' })

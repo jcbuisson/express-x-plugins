@@ -564,6 +564,28 @@ test('BIGINT filters stay numeric and lossless across snapshots, local edits, an
    assert.equal((await reopened.findMany({ quantity: 20 }))[0].uid, created.uid)
 })
 
+test('nullable snapshots retain known BIGINT types for existing and newly appearing rows', async t => {
+   const db = new PGlite()
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('rows', { localDb: db, network: { onLine: false }, retryMs: 60_000 })
+   t.after(async () => { model.stop(); await model.waitForIdle(); await db.close() })
+   await model.prepare()
+   model.start()
+   const first = { uid: crypto.randomUUID(), quantity: 10n, code: '10', version: 1n, deleted: false }
+   Shape.current.emit({ rows: [first] })
+   await model.waitForIdle()
+   const second = { uid: crypto.randomUUID(), quantity: null, code: null, version: 3n, deleted: false }
+   Shape.current.emit({ rows: [{ ...first, quantity: null, code: null, version: 2n }, second] })
+   await model.waitForIdle()
+   await model.update(first.uid, { quantity: '12', code: '10' })
+   await model.update(second.uid, { quantity: '13', code: '10' })
+   assert.equal((await model.findMany({ quantity: 12 }))[0].uid, first.uid)
+   assert.equal((await model.findMany({ quantity: 13n }))[0].uid, second.uid)
+   assert.equal((await model.findMany({ quantity: { gt: '2' } })).length, 2)
+   assert.deepEqual(await model.findMany({ code: { gt: '2' } }), [])
+})
+
 test('preparing an older cache adds BIGINT type metadata without deleting rows', async t => {
    const db = new PGlite()
    let model

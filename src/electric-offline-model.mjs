@@ -195,9 +195,13 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
               AND pending.row_id = incoming.data->>$3
               AND pending.acknowledged_version <= (incoming.data->>'version')::numeric`,
          [modelName, incoming, primaryKey])
-         await tx.query(`INSERT INTO electric_local_rows (model_name, row_id, data, bigint_columns)
+         await tx.query(`WITH known_bigints AS MATERIALIZED (
+               SELECT unnest(bigint_columns) AS column_name FROM electric_local_rows WHERE model_name = $1
+               UNION SELECT jsonb_array_elements_text(value) FROM jsonb_each($4::jsonb)
+            ) INSERT INTO electric_local_rows (model_name, row_id, data, bigint_columns)
             SELECT $1, incoming.data->>$3, incoming.data,
-               ARRAY(SELECT jsonb_array_elements_text($4::jsonb -> (incoming.data->>$3)))
+               ARRAY(SELECT column_name FROM known_bigints WHERE incoming.data->column_name = 'null'::jsonb
+                  UNION SELECT jsonb_array_elements_text($4::jsonb -> (incoming.data->>$3)))
             FROM jsonb_array_elements($2::jsonb) AS incoming(data)
             WHERE NOT COALESCE((incoming.data->>'deleted')::boolean, false)
               AND NOT EXISTS (SELECT 1 FROM electric_mutation_queue AS pending

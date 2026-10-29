@@ -149,11 +149,11 @@ export function offlinePlugin(app, options = {}) {
             && !currentMetadata.deleted_at
       }
 
-      async function applyUpdateAcknowledgement(uid, requestUpdatedAt, result) {
+      async function applyUpdateAcknowledgement(uid, requestMetadata, result) {
          const [value, meta] = validateServiceResult(result, uid)
          await db.transaction('rw', [db.values, db.metadata], async () => {
             const currentMetadata = await db.metadata.get(uid)
-            if (!currentMetadata || !sameTimestamp(currentMetadata.updated_at, requestUpdatedAt)) return
+            if (!metadataUnchangedSinceRequest(currentMetadata, requestMetadata)) return
             if (meta?.deleted_at) {
                await db.values.delete(uid)
                await db.metadata.delete(uid)
@@ -164,13 +164,13 @@ export function offlinePlugin(app, options = {}) {
          })
       }
 
-      async function applyDeleteAcknowledgement(uid, requestDeletedAt, result) {
+      async function applyDeleteAcknowledgement(uid, requestMetadata, result) {
          const [value, meta] = validateServiceResult(result, uid)
          await db.transaction('rw', [db.values, db.metadata], async () => {
             const currentMetadata = await db.metadata.get(uid)
-            if (!currentMetadata || !sameTimestamp(currentMetadata.deleted_at, requestDeletedAt)) return
+            if (!metadataUnchangedSinceRequest(currentMetadata, requestMetadata)) return
             if (meta?.uid && compareMetadataTime(currentMetadata, meta) > 0) return
-            if (meta?.deleted_at && !sameTimestamp(meta.deleted_at, requestDeletedAt)) {
+            if (meta?.deleted_at && !sameTimestamp(meta.deleted_at, requestMetadata.deleted_at)) {
                await db.values.delete(uid)
                await db.metadata.delete(uid)
                return
@@ -206,7 +206,7 @@ export function offlinePlugin(app, options = {}) {
          // execute on server, asynchronously, if connection is active
          if (app.isConnected) {
             app.service(modelName).updateWithMeta(uid, fullUpdatedData, now)
-            .then(result => applyUpdateAcknowledgement(uid, now, result))
+            .then(result => applyUpdateAcknowledgement(uid, { ...previousMetadata, updated_at: now }, result))
             .catch(async err => {
                console.log(`*** err sync ${modelName} update`, err)
                if (!isDefinitiveServiceError(err)) return
@@ -247,13 +247,13 @@ export function offlinePlugin(app, options = {}) {
          // and in database, if connected
          if (app.isConnected) {
             app.service(modelName).deleteWithMeta(uid, deleted_at)
-            .then(result => applyDeleteAcknowledgement(uid, deleted_at, result))
+            .then(result => applyDeleteAcknowledgement(uid, { ...previousMetadata, deleted_at }, result))
             .catch(async err => {
                console.log(`*** err sync ${modelName} remove`, err)
                if (!isDefinitiveServiceError(err)) return
                await db.transaction('rw', [db.values, db.metadata], async () => {
                   const currentMetadata = await db.metadata.get(uid)
-                  if (!currentMetadata || !sameTimestamp(currentMetadata.deleted_at, deleted_at)) return
+                  if (!metadataUnchangedSinceRequest(currentMetadata, { ...previousMetadata, deleted_at })) return
                   await db.values.update(uid, { __deleted__: previousDeletedMarker ?? null })
                   await db.metadata.put({ uid, ...previousMetadata })
                })

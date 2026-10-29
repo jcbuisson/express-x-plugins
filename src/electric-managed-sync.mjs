@@ -12,6 +12,7 @@ export function createManagedSync(options, createModel) {
    let database
    let preparation = Promise.resolve()
    let closed = false
+   let disposal
    const models = new Map()
 
    function getDatabase() {
@@ -52,12 +53,15 @@ export function createManagedSync(options, createModel) {
       }
       let active = true
       let disposed = false
+      let disposal
       let controller
       let release
       let generation = 0
       let channel
       let offline
       let error = null
+      const invocations = new Set()
+      const subscribers = new Set()
       const network = modelOptions.network ?? options.network ?? globalThis.navigator
       const networkEvents = options.networkEvents ?? globalThis
       function report(cause) {
@@ -129,28 +133,39 @@ export function createManagedSync(options, createModel) {
       }
       function invoke(method, ...args) {
          if (disposed) return Promise.reject(new Error('Electric model has been disposed'))
-         return ready.then(model => model[method](...args))
+         const invocation = ready.then(model => model[method](...args)).finally(() => invocations.delete(invocation))
+         invocations.add(invocation)
+         return invocation
       }
       const api = {
          prepare: () => ready.then(() => undefined), start, stop,
-         async dispose() {
-            if (disposed) return
+         dispose() {
+            if (disposal) return disposal
             disposed = true
-            networkEvents.removeEventListener?.('offline', updateNetwork)
-            networkEvents.removeEventListener?.('online', updateNetwork)
-            stop()
-            try { await ready; await offline.waitForIdle() } finally { channel?.close(); models.delete(name) }
+            disposal = Promise.resolve().then(async () => {
+               for (const subscriber of subscribers) subscriber.complete()
+               networkEvents.removeEventListener?.('offline', updateNetwork)
+               networkEvents.removeEventListener?.('online', updateNetwork)
+               stop()
+               try {
+                  await ready
+                  await Promise.allSettled([...invocations])
+                  await offline.waitForIdle()
+               } finally { channel?.close(); models.delete(name) }
+            })
+            return disposal
          },
          getObservable(where = {}) {
             return new Observable(subscriber => {
                if (disposed) { subscriber.error(new Error('Electric model has been disposed')); return }
                let subscription
                let cancelled = false
+               subscribers.add(subscriber)
                const fail = cause => subscriber.error(cause)
                void ready.then(model => {
-                  if (!cancelled) subscription = model.getObservable(where).subscribe(subscriber)
+                  if (!cancelled && !disposed) subscription = model.getObservable(where).subscribe(subscriber)
                }).catch(fail)
-               return () => { cancelled = true; subscription?.unsubscribe() }
+               return () => { cancelled = true; subscribers.delete(subscriber); subscription?.unsubscribe() }
             })
          },
          findMany: (where = {}) => invoke('findMany', where),
@@ -164,10 +179,13 @@ export function createManagedSync(options, createModel) {
       models.set(name, { api, primaryKey: modelOptions.primaryKey ?? 'uid' })
       return api
    }
-   async function dispose() {
+   function dispose() {
+      if (disposal) return disposal
       closed = true
-      await Promise.allSettled([...models.values()].map(({ api }) => api.dispose()))
-      if (database && !options.localDb) await (await database).close()
+      disposal = Promise.allSettled([...models.values()].map(({ api }) => api.dispose())).then(async () => {
+         if (database && !options.localDb) await (await database).close()
+      })
+      return disposal
    }
    return { model, dispose }
 }

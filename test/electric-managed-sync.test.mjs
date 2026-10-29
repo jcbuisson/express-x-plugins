@@ -215,6 +215,49 @@ test('a returning sync owner preserves shared rows until its new snapshot arrive
    }
 })
 
+test('plugin disposal drains foreground writes and completes observable subscriptions before closing', async () => {
+   const db = new PGlite()
+   let entered
+   let release
+   const writing = new Promise(resolve => { entered = resolve })
+   const gate = new Promise(resolve => { release = resolve })
+   const app = configure(undefined, new Locks(), {}, {
+      network: { onLine: false },
+      createDatabase: async () => ({
+         query: (...args) => db.query(...args), exec: (...args) => db.exec(...args),
+         async transaction(callback) { entered(); await gate; return db.transaction(callback) },
+         close: () => db.close(),
+      }),
+   })
+   try {
+      const model = app.createElectricModel('todos')
+      await model.prepare()
+      let completed = false
+      model.getObservable().subscribe({ complete() { completed = true } })
+      const created = model.create({ title: 'must finish before close' })
+      await writing
+      let disposed = false
+      const modelDisposal = model.dispose()
+      assert.equal(model.dispose(), modelDisposal)
+      const pluginDisposal = app.disposeElectricSync()
+      assert.equal(app.disposeElectricSync(), pluginDisposal)
+      const disposing = pluginDisposal.then(() => { disposed = true })
+      await Promise.resolve()
+      assert.equal(completed, true)
+      assert.equal(disposed, false)
+      assert.equal(db.closed, false)
+      release()
+      assert.equal((await created).title, 'must finish before close')
+      await disposing
+      assert.equal(db.closed, true)
+      await assert.rejects(model.create({ title: 'too late' }), /disposed/)
+   } finally {
+      release()
+      await app.disposeElectricSync()
+      if (!db.closed) await db.close()
+   }
+})
+
 test('initialization errors reject writes and observable reads and call onError', async () => {
    const error = new Error('Worker could not load assets')
    const reported = []

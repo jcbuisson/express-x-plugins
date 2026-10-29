@@ -157,12 +157,14 @@ Additional transition guards and actions:
   Successful writes make deferred rows eligible again in the same flush, so
   reverse-ordered parent/child creations can finish. A pass without progress
   ends the flush and leaves unresolved rows Pending.
-- Permanent means `forbidden`, a `TypeError`, or HTTP 4xx except 408, 425, and
+- Permanent means `forbidden` or HTTP 4xx except 408, 425, and
   429, plus `invalid-argument`, `sync-create-conflict`, PostgreSQL data exceptions
   (SQLSTATE class 22), and not-null, unique, check, and exclusion constraint
   violations. Server mutation validation uses the `invalid-argument` code so
   it remains recognizable after Express-X serializes the error. A response
   without a version is an error and remains retryable.
+  A bare `TypeError` remains retryable because fetch uses it for network failures;
+  validation failures are identified by their explicit `invalid-argument` code.
 - Responses and failure writes are revision-guarded. An old response must not
   acknowledge a newer local edit. If a create was edited while its request was
   in flight, its successful response converts the queued create into an update

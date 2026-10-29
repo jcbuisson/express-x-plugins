@@ -384,6 +384,30 @@ test('stop ends an explicit flush after its current request and idle waits for i
    assert.deepEqual(calls, [first.uid, second.uid])
 })
 
+test('network TypeErrors keep queued mutations retryable', async t => {
+   const db = new PGlite()
+   t.after(() => db.close())
+   let failing = true
+   const calls = []
+   const app = { service: () => ({ async create(id, data) {
+      calls.push(id)
+      if (failing) throw new TypeError('Failed to fetch')
+      return { uid: id, ...data, version: '1' }
+   } }) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('todos', { localDb: db })
+   await model.prepare()
+   const first = await model.create({ title: 'first' })
+   const second = await model.create({ title: 'second' })
+   await model.flushQueue()
+   assert.deepEqual(calls, [first.uid])
+   assert.equal((await model.getStatus()).failed, 0)
+   failing = false
+   await model.flushQueue()
+   assert.deepEqual(calls, [first.uid, first.uid, second.uid])
+   assert.equal((await db.query('SELECT count(*)::int AS count FROM electric_mutation_queue WHERE acknowledged_version IS NULL')).rows[0].count, 0)
+})
+
 test('offline writes stay local until the acknowledged Electric version arrives', async () => {
    const db = new PGlite()
    const calls = []

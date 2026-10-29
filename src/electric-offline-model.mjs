@@ -403,7 +403,7 @@ function isPermanent(error) {
    const status = error?.status ?? error?.response?.status
    return ['forbidden', 'invalid-argument', 'sync-create-conflict'].includes(error?.code) ||
       /^22[0-9A-Z]{3}$/.test(error?.code ?? '') ||
-      ['23502', '23505', '23514', '23P01'].includes(error?.code) || error instanceof TypeError ||
+      ['23502', '23505', '23514', '23P01'].includes(error?.code) ||
       status >= 400 && status < 500 && ![408, 425, 429].includes(status)
 }
 

@@ -156,6 +156,7 @@ export function createManagedSync(options, createModel) {
             return disposal
          },
          getObservable(where = {}) {
+            const query = structuredClone(where)
             return new Observable(subscriber => {
                if (disposed) { subscriber.error(new Error('Electric model has been disposed')); return }
                let subscription
@@ -163,7 +164,7 @@ export function createManagedSync(options, createModel) {
                subscribers.add(subscriber)
                const fail = cause => subscriber.error(cause)
                void ready.then(model => {
-                  if (!cancelled && !disposed) subscription = model.getObservable(where).subscribe(subscriber)
+                  if (!cancelled && !disposed) subscription = model.getObservable(query).subscribe(subscriber)
                }).catch(fail)
                return () => { cancelled = true; subscribers.delete(subscriber); subscription?.unsubscribe() }
             })

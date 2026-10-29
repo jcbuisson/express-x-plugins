@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { PGlite } from '@electric-sql/pglite'
+import { firstValueFrom } from 'rxjs'
 import { electricClientPlugin } from '../src/electric-client-plugin.mjs'
 
 class Locks {
@@ -291,6 +292,25 @@ test('disposal during preparation keeps the channel open until accepted writes f
       assert.equal((await db.query('SELECT count(*)::int AS count FROM electric_mutation_queue')).rows[0].count, 1)
    } finally {
       release()
+      await app.disposeElectricSync()
+      await db.close()
+   }
+})
+
+test('managed observable filters are captured before readiness and subscription', async () => {
+   const db = new PGlite()
+   const app = configure(db, new Locks(), {}, { network: { onLine: false } })
+   try {
+      const model = app.createElectricModel('todos')
+      const where = { score: { gte: 1, lte: 1 } }
+      const observable = model.getObservable(where)
+      where.score.gte = 2
+      where.score.lte = 2
+      await model.prepare()
+      const first = await model.create({ score: 1 })
+      await model.create({ score: 2 })
+      assert.deepEqual((await firstValueFrom(observable)).map(row => row.uid), [first.uid])
+   } finally {
       await app.disposeElectricSync()
       await db.close()
    }

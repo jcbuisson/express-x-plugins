@@ -242,6 +242,55 @@ for (const onDelete of ['', 'ON DELETE CASCADE']) {
    })
 }
 
+for (const staleFailure of [false, true]) {
+   test(`new observable reads supersede stale ${staleFailure ? 'errors' : 'results'}`, async t => {
+      const db = new PGlite()
+      let release
+      let entered
+      let hold = false
+      const gate = new Promise(resolve => { release = resolve })
+      const reading = new Promise(resolve => { entered = resolve })
+      const delayed = {
+         exec: (...args) => db.exec(...args),
+         transaction: callback => db.transaction(callback),
+         async query(sql, ...args) {
+            const result = await db.query(sql, ...args)
+            if (hold && sql.startsWith('SELECT data FROM electric_local_rows')) {
+               hold = false
+               entered()
+               await gate
+               if (staleFailure) throw new Error('stale read failed')
+            }
+            return result
+         },
+      }
+      const app = { service: () => ({}) }
+      electricClientPlugin(app, { ShapeStream: Stream, Shape })
+      const model = app.createElectricModel('todos', { localDb: delayed })
+      let subscription
+      t.after(async () => { subscription?.unsubscribe(); release(); await db.close() })
+      await model.prepare()
+      const row = await model.create({ title: 'old' })
+      hold = true
+      const observed = []
+      const errors = []
+      let sawNew
+      const newer = new Promise(resolve => { sawNew = resolve })
+      subscription = model.getObservable().subscribe({
+         next(rows) { observed.push(rows[0].title); if (rows[0].title === 'new') sawNew() },
+         error(error) { errors.push(error) },
+      })
+      await reading
+      await model.update(row.uid, { title: 'new' })
+      await newer
+      release()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(observed, ['new'])
+      assert.deepEqual(errors, [])
+      assert.equal(subscription.closed, false)
+   })
+}
+
 test('constraint failures do not block valid writes and an edit can retry a failed row', async t => {
    const { app, local, server, services } = await syncFixture(t,
       "CREATE TABLE todos (uid UUID PRIMARY KEY, title TEXT NOT NULL UNIQUE CHECK (length(title) > 2))",

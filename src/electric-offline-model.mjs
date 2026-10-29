@@ -83,7 +83,14 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    function createObservable(where) {
       return new Observable(subscriber => {
          let active = true
-         const emit = () => { void findMany(where).then(rows => { if (active) subscriber.next(rows) }, error => subscriber.error(error)) }
+         let generation = 0
+         const emit = () => {
+            const read = ++generation
+            void findMany(where).then(
+               rows => { if (active && read === generation) subscriber.next(rows) },
+               error => { if (active && read === generation) subscriber.error(error) },
+            )
+         }
          const unsubscribe = subscribe(emit)
          emit()
          return () => { active = false; unsubscribe() }

@@ -97,3 +97,46 @@ test('a rejected restoration restores the preceding pending deletion', async t =
    assert.deepEqual(await model.db.values.get('row'), previousValue)
    assert.deepEqual(await model.db.metadata.get('row'), previousMetadata)
 })
+
+test('another client releasing a shared scope cannot disable an active client synchronization', async t => {
+   const namespace = `shared-sync-${crypto.randomUUID()}`
+   let syncCalls = 0
+   const clients = []
+   const subscriptions = []
+   t.after(async () => {
+      for (const subscription of subscriptions) subscription.unsubscribe()
+      await new Promise(resolve => setTimeout(resolve, 10))
+      for (const { model } of clients) model.db.close()
+   })
+   function client() {
+      const app = {
+         isConnected: false,
+         addConnectListener() {}, addDisconnectListener() {},
+         service: () => ({
+            on: () => () => {},
+            async go() {
+               syncCalls++
+               return { addClient: [], updateClient: [], deleteClient: [], addDatabase: [], updateDatabase: [] }
+            },
+         }),
+      }
+      offlinePlugin(app, { cacheNamespace: namespace })
+      const model = app.createOfflineModel('rows', ['label'])
+      const result = { app, model }
+      clients.push(result)
+      return result
+   }
+   const first = client()
+   const second = client()
+   await Promise.all(clients.map(({ model }) => new Promise((resolve, reject) => {
+      subscriptions.push(model.getObservable({ label: 'active' }).subscribe({ next: resolve, error: reject }))
+   })))
+   subscriptions[0].unsubscribe()
+   for (let attempt = 0; attempt < 100 && await first.model.db.whereList.count(); attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 2))
+   }
+   assert.equal(await first.model.db.whereList.count(), 0)
+   second.app.isConnected = true
+   await second.model.synchronizeAll()
+   assert.equal(syncCalls, 1)
+})

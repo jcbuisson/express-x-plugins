@@ -352,7 +352,7 @@ export function offlinePlugin(app, options = {}) {
 
       async function synchronizeAll() {
          await flushDirtyMutations(modelName, db.values, db.metadata)
-         await synchronizeModelWhereList(modelName, db.values, db.metadata, db.whereList, synchronizeWhere)
+         await synchronizeModelWhereList(modelName, db.values, db.metadata, db.whereList, synchronizeWhere, [...ownedWhereCounts.keys()])
       }
 
       async function synchronizeWhere(where) {
@@ -702,12 +702,14 @@ export function offlinePlugin(app, options = {}) {
       let modified = false
       try {
          const sortedjson = stringifyWithSortedKeys(where)
-         const existing = await whereDb.get(sortedjson)
-         if (!existing) {
-            // sortedjson is used as a unique standardized representation of a 'where' object ; it is used both as key and value in 'wheredb' database
-            await whereDb.add({ sortedjson })
-            modified = true
-         }
+         await whereDb.db.transaction('rw', whereDb, async () => {
+            const existing = await whereDb.get(sortedjson)
+            if (!existing) {
+               // IndexedDB serializes this read/add across clients sharing the cache.
+               await whereDb.add({ sortedjson })
+               modified = true
+            }
+         })
       } catch(err) {
          console.log('err addSynchroDBWhere', where, err)
       } finally {
@@ -728,8 +730,12 @@ export function offlinePlugin(app, options = {}) {
       }
    }
 
-   async function synchronizeModelWhereList(modelName, idbValues, idbMetadata, whereDb, syncWhere = null) {
+   async function synchronizeModelWhereList(modelName, idbValues, idbMetadata, whereDb, syncWhere = null, ownedWhereKeys = []) {
       const whereList = await getWhereList(whereDb)
+      const persistedKeys = new Set(whereList.map(where => stringifyWithSortedKeys(where)))
+      for (const key of ownedWhereKeys) {
+         if (!persistedKeys.has(key)) whereList.push(JSON.parse(key))
+      }
       for (const where of whereList) {
          if (syncWhere) await syncWhere(where)
          else await synchronize(modelName, idbValues, idbMetadata, where)

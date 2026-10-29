@@ -215,9 +215,18 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
          const values = entries.map(([, value]) => value)
          const parameters = values.map((_, index) => `$${index + 1}`)
          const inserted = await tx.query(`INSERT INTO ${model.quotedTable} (${columns.join(', ')}) VALUES (${parameters.join(', ')})
-            ON CONFLICT (${model.quotedPrimaryKey}) DO UPDATE SET ${model.quotedPrimaryKey} = EXCLUDED.${model.quotedPrimaryKey}
+            ON CONFLICT (${model.quotedPrimaryKey}) DO NOTHING
             RETURNING *`, values)
          result = inserted.rows[0]
+         if (!result) {
+            const existing = await tx.query(`SELECT * FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 FOR UPDATE`, [id])
+            result = existing.rows[0]
+            if (!result?.deleted) {
+               const error = new Error(`Cannot create '${model.name}': row '${id}' already exists`)
+               error.code = 'sync-create-conflict'
+               throw error
+            }
+         }
 
       } else if (action === 'update' || editedCreate) {
          const set = buildSet(data, model.primaryKey)

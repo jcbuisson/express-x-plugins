@@ -64,7 +64,11 @@ test('edits survive a committed create whose response was lost', async () => {
       assert.equal((await model.getStatus()).pending, 0)
 
       // Another client's colliding create still cannot overwrite the row.
-      await service.create(row.id, { title: 'collision' }, { clientId: crypto.randomUUID(), revision: '1' })
+      const collider = crypto.randomUUID()
+      for (const revision of ['1', '2']) {
+         await assert.rejects(service.create(row.id, { title: 'collision' }, { clientId: collider, revision }),
+            { code: 'sync-create-conflict' })
+      }
       assert.deepEqual((await server.query('SELECT * FROM todos')).rows, [edited])
 
       // A delayed edited create must not resurrect a tombstone.
@@ -78,6 +82,98 @@ test('edits survive a committed create whose response was lost', async () => {
       await db.close()
       await server.close()
    }
+})
+
+async function syncFixture(t, schema, models) {
+   const server = new PGlite()
+   const local = new PGlite()
+   t.after(async () => { await local.close(); await server.close() })
+   await server.exec(schema)
+   await prepareElectricSyncSchema(server, models)
+   const services = new Map()
+   const pool = { query: server.query.bind(server), async connect() {
+      return { query: server.query.bind(server), release() {} }
+   } }
+   electricServerPlugin({ createService(name, service) { services.set(name, service) }, get() {} }, pool, models, { sync: true })
+   const app = { service: name => services.get(name) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   return { server, local, services, app }
+}
+
+test('a flush resolves reverse-ordered same-model parents without spinning on missing parents', async t => {
+   const { app, local, server, services } = await syncFixture(t,
+      'CREATE TABLE nodes (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES nodes(uid) ON DELETE CASCADE)',
+      [{ name: 'nodes', tombstoneData: { parent_uid: null } }])
+   const service = services.get('nodes')
+   let calls = 0
+   const create = service.create
+   service.create = async (...args) => { calls++; return create(...args) }
+   const model = app.createElectricModel('nodes', { localDb: local })
+   await model.prepare()
+   const root = crypto.randomUUID()
+   const middle = crypto.randomUUID()
+   await model.create({ parent_uid: middle })
+   await model.create({ uid: middle, parent_uid: root })
+   await model.create({ uid: root, parent_uid: null })
+   await model.flushQueue()
+   assert.equal((await server.query('SELECT * FROM nodes WHERE NOT deleted')).rows.length, 3)
+   assert.equal((await local.query('SELECT * FROM electric_mutation_queue WHERE acknowledged_version IS NULL')).rows.length, 0)
+
+   const orphan = await model.create({ parent_uid: crypto.randomUUID() })
+   const before = calls
+   await model.flushQueue()
+   assert.equal(calls, before + 1)
+   await model.flushQueue()
+   assert.equal(calls, before + 2)
+   const queued = (await local.query('SELECT * FROM electric_mutation_queue WHERE row_id = $1', [orphan.uid])).rows[0]
+   assert.equal(queued.status, 'pending')
+   assert.equal(queued.acknowledged_version, null)
+})
+
+test('constraint failures do not block valid writes and an edit can retry a failed row', async t => {
+   const { app, local, server, services } = await syncFixture(t,
+      "CREATE TABLE todos (uid UUID PRIMARY KEY, title TEXT NOT NULL UNIQUE CHECK (length(title) > 2))",
+      [{ name: 'todos', tombstoneData: { title: 'deleted' } }])
+   await services.get('todos').create(crypto.randomUUID(), { title: 'taken' }, { clientId: crypto.randomUUID(), revision: '1' })
+   const model = app.createElectricModel('todos', { localDb: local })
+   await model.prepare()
+   const duplicate = await model.create({ title: 'taken' })
+   await model.create({ title: null })
+   await model.create({ title: 'x' })
+   const valid = await model.create({ title: 'valid' })
+   await model.flushQueue()
+   assert.equal((await model.getStatus()).failed, 3)
+   assert.equal((await model.getStatus()).pending, 1)
+   assert.equal((await server.query('SELECT title FROM todos WHERE uid = $1', [valid.uid])).rows[0].title, 'valid')
+   await model.update(duplicate.uid, { title: 'repaired' })
+   await model.flushQueue()
+   assert.equal((await model.getStatus()).failed, 2)
+   assert.equal((await server.query('SELECT title FROM todos WHERE uid = $1', [duplicate.uid])).rows[0].title, 'repaired')
+})
+
+test('an edited colliding create with a lost rejection never overwrites the existing row', async t => {
+   const { app, local, server, services } = await syncFixture(t,
+      'CREATE TABLE todos (uid UUID PRIMARY KEY, title TEXT)', ['todos'])
+   const id = crypto.randomUUID()
+   const service = services.get('todos')
+   const original = await service.create(id, { title: 'original' }, { clientId: crypto.randomUUID(), revision: '1' })
+   const create = service.create
+   let loseResponse = true
+   service.create = async (...args) => {
+      try { return await create(...args) } catch (error) {
+         if (loseResponse) { loseResponse = false; throw new Error('response lost') }
+         throw error
+      }
+   }
+   const model = app.createElectricModel('todos', { localDb: local })
+   await model.prepare()
+   await model.create({ uid: id, title: 'collision' })
+   await model.flushQueue()
+   await model.update(id, { title: 'edited collision' })
+   await model.flushQueue()
+   assert.equal((await model.getStatus()).failed, 1)
+   assert.deepEqual((await server.query('SELECT * FROM todos WHERE uid = $1', [id])).rows, [original])
+   assert.equal((await server.query('SELECT * FROM electric_mutation_cursor')).rows.length, 1)
 })
 
 test('offline writes stay local until the acknowledged Electric version arrives', async () => {

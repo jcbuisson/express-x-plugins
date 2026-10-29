@@ -146,8 +146,14 @@ Additional transition guards and actions:
 - A transient failure leaves the entry Pending and ends the current flush loop.
   A later trigger retries it. A permanent failure marks the matching revision
   Failed and permits the loop to continue with other entries.
+- Missing-parent failures defer that row while later entries are attempted.
+  Successful writes make deferred rows eligible again in the same flush, so
+  reverse-ordered parent/child creations can finish. A pass without progress
+  ends the flush and leaves unresolved rows Pending.
 - Permanent means `forbidden`, a `TypeError`, or HTTP 4xx except 408, 425, and
-  429. A response without a version is an error and remains retryable.
+  429, plus `sync-create-conflict` and PostgreSQL not-null, unique, check, and
+  exclusion constraint violations. A response without a version is an error
+  and remains retryable.
 - Responses and failure writes are revision-guarded. An old response must not
   acknowledge a newer local edit. If a create was edited while its request was
   in flight, its successful response converts the queued create into an update
@@ -204,18 +210,23 @@ stateDiagram-v2
     absent --> live: first create inserts row
     absent --> tombstone: update or delete
     live --> live: accepted update or edited create advances version
-    live --> live: initial create conflicts and preserves row
+    live --> live: initial create conflicts and rejects request
     live --> tombstone: accepted delete advances version
     tombstone --> tombstone: update or delete advances tombstone version
     tombstone --> tombstone: create preserves tombstone
 ```
 
-These transitions describe accepted newer cursor revisions. Replayed revisions
-do not change the record. An initial create conflicts by preserving the existing
-row. A later create from a cursor that already has an accepted revision is
+These transitions describe newer cursor revisions, including rejected creates
+that leave the record unchanged. Replayed revisions do not change the record.
+A later create from a cursor that already has an accepted revision is
 treated as an update when it contains non-key data. Updates affect only live
 rows; updating an absent or deleted row writes a tombstone instead. This sync
 API has no tombstone-to-live transition or automatic tombstone pruning.
+
+A create colliding with a live row throws `sync-create-conflict` and rolls back
+its cursor. A newer create from that client therefore cannot be mistaken for
+an edit of a successfully inserted row. Creates colliding with tombstones
+continue to return the tombstone.
 
 | State | PostgreSQL representation | Local snapshot result without a queued mutation |
 | --- | --- | --- |

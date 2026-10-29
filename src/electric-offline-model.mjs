@@ -192,18 +192,25 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       if (!ownsSync || flushing || network?.onLine === false) return
       flushing = true
       try {
+         const deferred = new Set()
          while (ownsSync) {
             const { rows } = await retryLeader(() => db.query(`SELECT * FROM electric_mutation_queue
                WHERE model_name = $1 AND status = 'pending' AND acknowledged_version IS NULL
-               ORDER BY revision LIMIT 1`, [modelName]))
+                 AND NOT (row_id = ANY($2::text[]))
+               ORDER BY revision LIMIT 1`, [modelName, [...deferred]]))
             const mutation = rows[0]
             if (!mutation) break
             try {
                const rejection = await sendMutation(mutation)
+               deferred.clear()
                if (rejection) report(rejection)
                else lastError = null
             } catch (error) {
                report(error)
+               if (error?.code === 'sync-parent-missing') {
+                  deferred.add(mutation.row_id)
+                  continue
+               }
                if (!isPermanent(error)) break
                await db.query(`UPDATE electric_mutation_queue SET status = 'failed', failure_reason = $3
                   WHERE model_name = $1 AND row_id = $2 AND revision = $4`,
@@ -360,7 +367,8 @@ function matchesWhere(row, where) {
 
 function isPermanent(error) {
    const status = error?.status ?? error?.response?.status
-   return error?.code === 'forbidden' || error instanceof TypeError ||
+   return error?.code === 'forbidden' || error?.code === 'sync-create-conflict' ||
+      ['23502', '23505', '23514', '23P01'].includes(error?.code) || error instanceof TypeError ||
       status >= 400 && status < 500 && ![408, 425, 429].includes(status)
 }
 

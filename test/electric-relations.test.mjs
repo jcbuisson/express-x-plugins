@@ -103,8 +103,12 @@ test('membership reassignment checks deleted parents and colliding creates canno
    await services.get('group').create(other, { name: 'Other' }, metadata())
    await services.get('group').delete(other, metadata())
    const original = await services.get('membership').create(id, { user_uid: user, group_uid: group }, metadata())
-   const collision = await services.get('membership').create(id, { user_uid: user, group_uid: other }, metadata())
-   assert.deepEqual(collision, original)
+   const collider = metadata()
+   for (const revision of ['1', '2']) {
+      await assert.rejects(services.get('membership').create(id, { user_uid: user, group_uid: other }, { ...collider, revision }),
+         { code: 'sync-create-conflict' })
+      assert.deepEqual((await db.query('SELECT * FROM membership WHERE uid = $1', [id])).rows, [original])
+   }
    const reassigned = await services.get('membership').update(id, { group_uid: other }, metadata())
    assert.equal(reassigned.deleted, true)
    assert.equal(reassigned.syncRejection.code, 'sync-parent-deleted')

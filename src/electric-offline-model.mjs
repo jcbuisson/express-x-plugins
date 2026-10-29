@@ -1,6 +1,7 @@
 import { shareQueryObservables } from './electric-query-observable.mjs'
 import { Observable } from 'rxjs'
 import { streamAbort } from './electric-stream-abort.mjs'
+import { whereToElectricParams } from './electric-where.mjs'
 
 /** Offline model backed by a shared PGlite database (normally PGliteWorker). */
 export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs, streamOptions = {}, onError }) {
@@ -64,6 +65,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    async function findMany(where = {}) {
+      whereToElectricParams(where)
       const { rows } = await retryLeader(() => db.query('SELECT data FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', [modelName]))
       return rows.map(row => row.data).filter(row => matchesWhere(row, where))
    }
@@ -72,7 +74,11 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       return (await findMany(where))[0] ?? null
    }
 
-   const getObservable = shareQueryObservables(createObservable)
+   const sharedObservables = shareQueryObservables(createObservable)
+   function getObservable(where = {}) {
+      whereToElectricParams(where)
+      return sharedObservables(where)
+   }
 
    function createObservable(where) {
       return new Observable(subscriber => {
@@ -376,12 +382,16 @@ function matchesWhere(row, where) {
    return Object.entries(where).every(([key, constraint]) => {
       if (constraint === undefined) return true
       const value = row[key]
+      if (constraint instanceof Date) return value != null && new Date(value).getTime() === constraint.getTime()
       if (constraint && typeof constraint === 'object' && !(constraint instanceof Date)) {
+         if (value == null) return false
          return Object.entries(constraint).every(([operator, limit]) => {
-            if (operator === 'gt') return value > limit
-            if (operator === 'gte') return value >= limit
-            if (operator === 'lt') return value < limit
-            if (operator === 'lte') return value <= limit
+            const actual = limit instanceof Date ? new Date(value).getTime() : value
+            const bound = limit instanceof Date ? limit.getTime() : limit
+            if (operator === 'gt') return actual > bound
+            if (operator === 'gte') return actual >= bound
+            if (operator === 'lt') return actual < bound
+            if (operator === 'lte') return actual <= bound
             throw new TypeError(`unsupported where constraint for '${key}'`)
          })
       }

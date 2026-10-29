@@ -188,6 +188,27 @@ test('offline sync rejects partial Shapes and supports local query filters', asy
    assert.deepEqual(observed, [positive])
 })
 
+test('offline filters validate empty caches and match SQL null and Date behavior', async t => {
+   const db = new PGlite()
+   t.after(() => db.close())
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('todos', { localDb: db })
+   await model.prepare()
+   await assert.rejects(model.findMany({ qty: { equals: 1 } }), /unsupported/)
+   await assert.rejects(model.findMany({ qty: { lt: null } }), /unsupported/)
+   assert.throws(() => model.getObservable({ qty: {} }), /unsupported/)
+   const before = new Date('2026-01-01')
+   const at = new Date('2026-01-02')
+   const after = new Date('2026-01-03')
+   await model.create({ qty: null, date: before })
+   const matching = await model.create({ qty: 2, date: at })
+   await model.create({ date: after })
+   assert.deepEqual((await model.findMany({ qty: { lt: 5 } })).map(row => row.uid), [matching.uid])
+   assert.deepEqual((await model.findMany({ date: at })).map(row => row.uid), [matching.uid])
+   assert.deepEqual((await model.findMany({ date: { gt: before, lt: after } })).map(row => row.uid), [matching.uid])
+})
+
 test('a flush resolves reverse-ordered same-model parents without spinning on missing parents', async t => {
    const { app, local, server, services } = await syncFixture(t,
       'CREATE TABLE nodes (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES nodes(uid) ON DELETE CASCADE)',

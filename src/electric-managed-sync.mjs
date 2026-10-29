@@ -82,7 +82,7 @@ export function createManagedSync(options, createModel) {
          const prepared = preparation.then(() => offline.prepare())
          preparation = prepared.catch(() => {})
          await prepared
-         if (disposed) { channel.close(); return offline }
+         if (disposed) return offline
          if (active) startOwnership()
          return offline
       })

@@ -258,6 +258,44 @@ test('plugin disposal drains foreground writes and completes observable subscrip
    }
 })
 
+test('disposal during preparation keeps the channel open until accepted writes finish', async () => {
+   const db = new PGlite()
+   let entered
+   let release
+   const preparing = new Promise(resolve => { entered = resolve })
+   const gate = new Promise(resolve => { release = resolve })
+   let channel
+   class StrictChannel extends Channel {
+      closed = false
+      constructor(name) { super(name); channel = this }
+      postMessage(message) {
+         if (this.closed) throw new DOMException('Channel is closed', 'InvalidStateError')
+         return super.postMessage(message)
+      }
+      close() { this.closed = true; super.close() }
+   }
+   const app = configure({
+      query: (...args) => db.query(...args), transaction: callback => db.transaction(callback),
+      async exec(sql) { entered(); await gate; return db.exec(sql) },
+   }, new Locks(), {}, { BroadcastChannel: StrictChannel })
+   try {
+      const model = app.createElectricModel('todos')
+      const writing = model.create({ title: 'accepted before disposal' })
+      await preparing
+      const disposing = app.disposeElectricSync()
+      release()
+      const created = await writing
+      await disposing
+      assert.equal(channel.closed, true)
+      assert.equal((await db.query('SELECT data FROM electric_local_rows')).rows[0].data.title, created.title)
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM electric_mutation_queue')).rows[0].count, 1)
+   } finally {
+      release()
+      await app.disposeElectricSync()
+      await db.close()
+   }
+})
+
 test('initialization errors reject writes and observable reads and call onError', async () => {
    const error = new Error('Worker could not load assets')
    const reported = []

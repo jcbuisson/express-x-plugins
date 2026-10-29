@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { PGlite } from '@electric-sql/pglite'
+import { createClient } from '@jcbuisson/express-x/client'
 import { electricClientPlugin } from '../src/electric-client-plugin.mjs'
 import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
 
@@ -149,6 +150,63 @@ test('constraint failures do not block valid writes and an edit can retry a fail
    await model.flushQueue()
    assert.equal((await model.getStatus()).failed, 2)
    assert.equal((await server.query('SELECT title FROM todos WHERE uid = $1', [duplicate.uid])).rows[0].title, 'repaired')
+})
+
+test('serialized validation and data errors fail their rows while transient errors remain retryable', async t => {
+   const { local, server, services } = await syncFixture(t,
+      'CREATE TABLE todos (uid UUID PRIMARY KEY, qty INTEGER)', ['todos'])
+   const errors = []
+   const requests = []
+   let transient = false
+   const socket = {
+      on() {},
+      timeout() { return this },
+      async emitWithAck(_event, { name, action, args }) {
+         requests.push(args[0])
+         let envelope
+         try {
+            if (transient) throw Object.assign(new Error('serialization failure'), { code: '40001' })
+            envelope = { result: await services.get(name)[action](...args) }
+         } catch (error) {
+            // Match Express-X's server envelope: Error prototypes are not sent.
+            envelope = { error: { code: error.code || 'unknown-error', message: error.message, stack: error.stack } }
+         }
+         return JSON.parse(JSON.stringify(envelope))
+      },
+   }
+   const app = createClient(socket)
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('todos', { localDb: local, onError: error => errors.push(error) })
+   await model.prepare()
+   await model.create({ qty: 1, 'invalid-column': true })
+   const invalidValue = await model.create({ qty: 'bad' })
+   await model.create({ qty: '2147483648' })
+   const valid = await model.create({ qty: 7 })
+   await model.flushQueue()
+   assert.deepEqual(errors.map(error => error.code), ['invalid-argument', '22P02', '22003'])
+   assert.ok(errors.every(error => !(error instanceof Error)))
+   assert.equal((await model.getStatus()).failed, 3)
+   assert.equal((await model.getStatus()).pending, 1)
+   assert.equal((await server.query('SELECT qty FROM todos WHERE uid = $1', [valid.uid])).rows[0].qty, 7)
+   await model.flushQueue()
+   assert.equal(requests.length, 4)
+   await model.update(invalidValue.uid, { qty: 5 })
+   await model.flushQueue()
+   assert.equal((await model.getStatus()).failed, 2)
+   assert.equal((await server.query('SELECT qty FROM todos WHERE uid = $1', [invalidValue.uid])).rows[0].qty, 5)
+
+   const retryable = await model.create({ qty: 8 })
+   const following = await model.create({ qty: 9 })
+   const before = requests.length
+   transient = true
+   await model.flushQueue()
+   assert.equal(requests.length, before + 1)
+   assert.equal(requests.at(-1), retryable.uid)
+   assert.equal((await model.getStatus()).failed, 2)
+   transient = false
+   await model.flushQueue()
+   assert.deepEqual(requests.slice(before), [retryable.uid, retryable.uid, following.uid])
+   assert.equal((await server.query('SELECT count(*)::int AS count FROM todos')).rows[0].count, 4)
 })
 
 test('an edited colliding create with a lost rejection never overwrites the existing row', async t => {

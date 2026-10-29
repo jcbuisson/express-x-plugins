@@ -151,9 +151,11 @@ Additional transition guards and actions:
   reverse-ordered parent/child creations can finish. A pass without progress
   ends the flush and leaves unresolved rows Pending.
 - Permanent means `forbidden`, a `TypeError`, or HTTP 4xx except 408, 425, and
-  429, plus `sync-create-conflict` and PostgreSQL not-null, unique, check, and
-  exclusion constraint violations. A response without a version is an error
-  and remains retryable.
+  429, plus `invalid-argument`, `sync-create-conflict`, PostgreSQL data exceptions
+  (SQLSTATE class 22), and not-null, unique, check, and exclusion constraint
+  violations. Server mutation validation uses the `invalid-argument` code so
+  it remains recognizable after Express-X serializes the error. A response
+  without a version is an error and remains retryable.
 - Responses and failure writes are revision-guarded. An old response must not
   acknowledge a newer local edit. If a create was edited while its request was
   in flight, its successful response converts the queued create into an update

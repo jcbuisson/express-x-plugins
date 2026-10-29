@@ -77,7 +77,7 @@ export function electricServerPlugin(app, db, models, options = {}) {
                ? { ...mutationData, [model.primaryKey]: idOrData }
                : { ...mutationData }
             if (sync) {
-               if (!hasClientId) throw new TypeError('sync mutations require a client-generated id')
+               if (!hasClientId) throw invalidArgument('sync mutations require a client-generated id')
                return mutate(model, 'create', idOrData, safeData, mutation)
             }
             const entries = Object.entries(safeData).filter(([, value]) => value !== undefined)
@@ -179,15 +179,15 @@ export async function prepareElectricSyncSchema(db, models) {
 }
 
 async function syncMutation(db, model, action, id, data, mutation, relations) {
-   if (!mutation || typeof mutation !== 'object') throw new TypeError('sync mutation metadata is required')
+   if (!mutation || typeof mutation !== 'object') throw invalidArgument('sync mutation metadata is required')
    const { clientId, revision } = mutation
-   if (typeof clientId !== 'string' || !UUID.test(clientId)) throw new TypeError('clientId must be a UUID')
+   if (typeof clientId !== 'string' || !UUID.test(clientId)) throw invalidArgument('clientId must be a UUID')
    if (!/^[1-9][0-9]*$/.test(String(revision)) || BigInt(revision) > 9223372036854775807n) {
-      throw new TypeError('revision must be a positive bigint')
+      throw invalidArgument('revision must be a positive bigint')
    }
-   if (typeof id !== 'string' || !UUID.test(id)) throw new TypeError('sync id must be a UUID')
+   if (typeof id !== 'string' || !UUID.test(id)) throw invalidArgument('sync id must be a UUID')
    if (action !== 'delete') assertPlainObject(data, 'mutation data')
-   if (data && ('version' in data || 'deleted' in data)) throw new TypeError('version and deleted are managed by sync')
+   if (data && ('version' in data || 'deleted' in data)) throw invalidArgument('version and deleted are managed by sync')
 
    return withTransaction(db, async tx => {
       await relations.lock(tx, model)
@@ -266,9 +266,13 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const RANGE_OPERATORS = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
 
+function invalidArgument(message) {
+   return Object.assign(new TypeError(message), { code: 'invalid-argument' })
+}
+
 function quoteIdentifier(value, label) {
    if (typeof value !== 'string' || !IDENTIFIER.test(value)) {
-      throw new TypeError(`${label} must be a simple SQL identifier`)
+      throw invalidArgument(`${label} must be a simple SQL identifier`)
    }
    return `"${value}"`
 }
@@ -309,7 +313,7 @@ function validateTombstoneData(data, primaryKey) {
 
 function assertPlainObject(value, label) {
    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.prototype.toString.call(value) !== '[object Object]') {
-      throw new TypeError(`${label} must be a plain object`)
+      throw invalidArgument(`${label} must be a plain object`)
    }
 }
 
@@ -344,7 +348,7 @@ function buildWhere(where, startIndex = 1) {
 function buildSet(data, primaryKey, startIndex = 1) {
    assertPlainObject(data, 'mutation data')
    const entries = Object.entries(data).filter(([key, value]) => key !== primaryKey && value !== undefined)
-   if (entries.length === 0) throw new TypeError('mutation data must contain at least one field')
+   if (entries.length === 0) throw invalidArgument('mutation data must contain at least one field')
    return {
       sql: entries.map(([column], index) => `${quoteIdentifier(column, 'data column')} = $${startIndex + index}`).join(', '),
       values: entries.map(([, value]) => value),

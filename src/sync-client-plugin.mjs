@@ -196,17 +196,17 @@ export function offlinePlugin(app, options = {}) {
             previousValue = { ...existingValue }
             previousMetadata = { ...(await db.metadata.get(uid)) }
             now = nextMutationTimestamp(previousMetadata)
-            await db.values.update(uid, safeData)
+            await db.values.update(uid, { ...safeData, ...(existingValue.__deleted__ ? { __deleted__: null } : {}) })
             fullUpdatedData = sanitizeMutationData({ ...existingValue, ...safeData })
             const operation = previousMetadata.__operation__ === 'create' ? 'create' : 'update'
-            await db.metadata.put({ uid, ...previousMetadata, updated_at: now, __dirty__: true, __operation__: operation })
+            await db.metadata.put({ uid, ...previousMetadata, updated_at: now, deleted_at: null, __dirty__: true, __operation__: operation })
             return true
          })
          if (!updated) return undefined
          // execute on server, asynchronously, if connection is active
          if (app.isConnected) {
             app.service(modelName).updateWithMeta(uid, fullUpdatedData, now)
-            .then(result => applyUpdateAcknowledgement(uid, { ...previousMetadata, updated_at: now }, result))
+            .then(result => applyUpdateAcknowledgement(uid, { ...previousMetadata, updated_at: now, deleted_at: null }, result))
             .catch(async err => {
                console.log(`*** err sync ${modelName} update`, err)
                if (!isDefinitiveServiceError(err)) return
@@ -215,6 +215,11 @@ export function offlinePlugin(app, options = {}) {
                   if (!currentMetadata || !sameTimestamp(currentMetadata.updated_at, now)) return
                   const currentValue = await db.values.get(uid)
                   const currentDeletedAt = currentMetadata.deleted_at ?? (currentValue?.__deleted__ ? new Date() : null)
+                  if (!currentDeletedAt) {
+                     await db.values.put(previousValue)
+                     await db.metadata.put(previousMetadata)
+                     return
+                  }
                   delete previousValue.uid
                   await db.values.update(uid, previousValue)
                   const rollbackMetadata = {

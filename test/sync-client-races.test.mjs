@@ -5,11 +5,17 @@ import { offlinePlugin } from '../src/sync-client-plugin.mjs'
 
 function deferredResponse() {
    let resolve
+   let reject
    let applied
-   const gate = new Promise(done => { resolve = done })
+   const gate = new Promise((done, fail) => { resolve = done; reject = fail })
    return {
-      resolve,
-      result: { then(callback) { applied = gate.then(callback); return applied } },
+      resolve, reject,
+      result: { then(callback) {
+         applied = gate.then(callback)
+         const catchError = applied.catch.bind(applied)
+         applied.catch = handler => { applied = catchError(handler); return applied }
+         return applied
+      } },
       applied: () => applied,
    }
 }
@@ -56,4 +62,38 @@ test('a late delete acknowledgement preserves a newer offline update', async t =
    assert.deepEqual(await model.db.metadata.get('row'), expected)
    assert.equal((await model.db.values.get('row')).label, 'restored')
    assert.equal(expected.__dirty__, true)
+})
+
+test('restoring an offline deleted row uploads an update rather than replaying its deletion', async t => {
+   const requests = []
+   const { app, model } = await fixture(t, {
+      async updateWithMeta(uid, data, updated_at) {
+         requests.push(['update', uid])
+         return [{ uid, ...data }, { uid, created_at: new Date('2026-01-01'), updated_at }]
+      },
+      async deleteWithMeta(uid) { requests.push(['delete', uid]); throw new Error('unexpected delete') },
+   })
+   app.isConnected = false
+   await model.remove('row')
+   await model.update('row', { label: 'restored offline' })
+   assert.equal((await model.findByUID('row')).label, 'restored offline')
+   assert.equal((await model.db.metadata.get('row')).deleted_at, null)
+   await model.synchronizeAll()
+   assert.deepEqual(requests, [['update', 'row']])
+   assert.equal((await model.db.metadata.get('row')).__dirty__, false)
+})
+
+test('a rejected restoration restores the preceding pending deletion', async t => {
+   const response = deferredResponse()
+   const { app, model } = await fixture(t, { updateWithMeta: () => response.result })
+   app.isConnected = false
+   await model.remove('row')
+   const previousValue = await model.db.values.get('row')
+   const previousMetadata = await model.db.metadata.get('row')
+   app.isConnected = true
+   await model.update('row', { label: 'rejected restoration' })
+   response.reject({ code: 'forbidden', message: 'restoration rejected' })
+   await response.applied()
+   assert.deepEqual(await model.db.values.get('row'), previousValue)
+   assert.deepEqual(await model.db.metadata.get('row'), previousMetadata)
 })

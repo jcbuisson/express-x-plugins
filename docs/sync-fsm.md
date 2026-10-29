@@ -108,6 +108,9 @@ against an equal or older live version. When the server row is absent, retained
 server metadata still participates: a sufficiently new server version can
 remove the client copy, while a newer live client version can recreate the row.
 Server records outside `where` are excluded before these comparisons.
+Server reads bracket row values with matching metadata versions and retry up
+to three times when concurrent writes change the snapshot. Metadata repair
+inserts missing versions without overwriting a concurrent mutation's metadata.
 
 The client applies downloads before uploads. Failed sync uploads preserve local
 dirty mutations for a later reconnect or explicit `synchronizeAll()`. Individual

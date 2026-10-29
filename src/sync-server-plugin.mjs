@@ -86,6 +86,12 @@ function normalizeMutationTimestamp(value, field) {
    return timestamp.getTime() > now + maxFutureSkew ? new Date(now) : timestamp
 }
 
+function snapshotChanged() {
+   const error = new Error('Sync snapshot changed during its read; retry synchronization')
+   error.code = 'sync-snapshot-changed'
+   return error
+}
+
 function metadataStorageUid(modelName, uid) {
    return JSON.stringify([modelName, uid])
 }
@@ -287,7 +293,7 @@ export function drizzleOfflinePlugin(app, db, metadata, models, options = {}) {
             if (queryOptions.limit != null) query = query.limit(queryOptions.limit)
             return await query;
          },
-         
+
          createWithMeta: async function(uid, data, created_at) {
             await authorize(this, modelName, 'createWithMeta', [uid, data, created_at])
             const safeData = sanitizeMutationData(data)
@@ -440,65 +446,97 @@ export function drizzleOfflinePlugin(app, db, metadata, models, options = {}) {
          try {
             console.log('>>>>> SYNC', modelName, where)
             const databaseService = app.service(modelName)
-      
-            // STEP1: get existing database `where` values and build a dictionary
-            const databaseValues = await databaseService.callWithContext(
-               this, 'findMany', where, { limit: maxSyncRecords + 1 },
-            )
-            if (databaseValues.length > maxSyncRecords) {
-               throw new Error(`sync result exceeds maxSyncRecords (${maxSyncRecords})`)
-            }
-            const databaseValuesDict = databaseValues.reduce((accu, value) => {
-               accu[value.uid] = value
-               return accu
-            }, Object.create(null))
 
-            // STEP 2: fetch metadata for each database record and each client-sent uid.
-            // Client uids matter when the server row was deleted: only the tombstone remains.
-            const effectiveClientMetadata = Object.assign(Object.create(null), clientMetadataDict)
+            const readSnapshot = async () => {
+               // STEP1: get existing database `where` values and build a dictionary
+               const databaseValues = await databaseService.callWithContext(
+                  this, 'findMany', where, { limit: maxSyncRecords + 1 },
+               )
+               if (databaseValues.length > maxSyncRecords) {
+                  throw new Error(`sync result exceeds maxSyncRecords (${maxSyncRecords})`)
+               }
+               const databaseValuesDict = databaseValues.reduce((accu, value) => {
+                  accu[value.uid] = value
+                  return accu
+               }, Object.create(null))
 
-            // A client-supplied uid whose real row exists outside `where` must not
-            // participate in this scoped sync. Treating it as a missing row can
-            // otherwise schedule an out-of-scope deletion.
-            const candidateOutsideUids = clientUids.filter(uid => !Object.hasOwn(databaseValuesDict, uid))
-            if (candidateOutsideUids.length > 0) {
-               const outsideRows = await db.select({ uid: configuredModels.get(modelName).uid })
-                  .from(configuredModels.get(modelName))
-                  .where(inArray(configuredModels.get(modelName).uid, candidateOutsideUids))
-               for (const row of outsideRows) delete effectiveClientMetadata[row.uid]
-            }
+               // STEP 2: fetch metadata for each database record and each client-sent uid.
+               // Client uids matter when the server row was deleted: only the tombstone remains.
+               const effectiveClientMetadata = Object.assign(Object.create(null), clientMetadataDict)
 
-            const databaseMetadataDict = Object.create(null)
-            const metadataUids = new Set([
-               ...Object.keys(databaseValuesDict),
-               ...Object.keys(effectiveClientMetadata),
-            ])
-            const metadataUidList = [...metadataUids]
-            if (metadataUidList.length > 0) {
-               const storageToUid = new Map(metadataUidList.map(uid => [storageUidFor(modelName, uid), uid]))
-               const rows = await db.select().from(metadata)
-                  .where(inArray(metadata.uid, [...storageToUid.keys()]))
-               for (const row of rows) {
-                  const uid = storageToUid.get(row.uid)
-                  databaseMetadataDict[uid] = externalizeMetadata(row, uid)
+               // A client-supplied uid whose real row exists outside `where` must not
+               // participate in this scoped sync. Treating it as a missing row can
+               // otherwise schedule an out-of-scope deletion.
+               const candidateOutsideUids = clientUids.filter(uid => !Object.hasOwn(databaseValuesDict, uid))
+               if (candidateOutsideUids.length > 0) {
+                  const outsideRows = await db.select({ uid: configuredModels.get(modelName).uid })
+                     .from(configuredModels.get(modelName))
+                     .where(inArray(configuredModels.get(modelName).uid, candidateOutsideUids))
+                  for (const row of outsideRows) delete effectiveClientMetadata[row.uid]
                }
 
-            }
-            const metadataRepairTimestamp = new Date()
-            for (const uid of Object.keys(databaseValuesDict)) {
-               if (databaseMetadataDict[uid]) continue
-               if (Object.hasOwn(effectiveClientMetadata, uid)
-                  && !effectiveClientMetadata[uid]?.__repaired__) continue
+               const databaseMetadataDict = Object.create(null)
+               const metadataUids = new Set([
+                  ...Object.keys(databaseValuesDict),
+                  ...Object.keys(effectiveClientMetadata),
+               ])
+               const metadataUidList = [...metadataUids]
+               if (metadataUidList.length > 0) {
+                  const storageToUid = new Map(metadataUidList.map(uid => [storageUidFor(modelName, uid), uid]))
+                  const rows = await db.select().from(metadata)
+                     .where(inArray(metadata.uid, [...storageToUid.keys()]))
+                  for (const row of rows) {
+                     const uid = storageToUid.get(row.uid)
+                     databaseMetadataDict[uid] = externalizeMetadata(row, uid)
+                  }
 
-               const [meta] = await db.insert(metadata)
-                  .values({ uid: storageUidFor(modelName, uid), created_at: metadataRepairTimestamp })
-                  .onConflictDoUpdate({
-                     target: metadata.uid,
-                     set: { created_at: metadataRepairTimestamp, updated_at: null, deleted_at: null },
-                  })
-                  .returning()
-               databaseMetadataDict[uid] = externalizeMetadata(meta, uid)
+               }
+               const metadataRepairTimestamp = new Date()
+               for (const uid of Object.keys(databaseValuesDict)) {
+                  if (databaseMetadataDict[uid]) continue
+                  if (Object.hasOwn(effectiveClientMetadata, uid)
+                     && !effectiveClientMetadata[uid]?.__repaired__) continue
+
+                  const [meta] = await db.insert(metadata)
+                     .values({ uid: storageUidFor(modelName, uid), created_at: metadataRepairTimestamp })
+                     .onConflictDoNothing({ target: metadata.uid })
+                     .returning()
+                  if (!meta) throw snapshotChanged()
+                  databaseMetadataDict[uid] = externalizeMetadata(meta, uid)
+               }
+
+               // Row values must lie between two identical metadata reads. Otherwise
+               // a concurrent mutation can pair old data with its new version forever.
+               const confirmedValues = await databaseService.callWithContext(
+                  this, 'findMany', where, { limit: maxSyncRecords + 1 },
+               )
+               const initialIds = Object.keys(databaseValuesDict).sort()
+               const confirmedIds = confirmedValues.map(value => value.uid).sort()
+               if (JSON.stringify(initialIds) !== JSON.stringify(confirmedIds)) throw snapshotChanged()
+               if (metadataUidList.length) {
+                  const storageToUid = new Map(metadataUidList.map(uid => [storageUidFor(modelName, uid), uid]))
+                  const confirmedMetadata = Object.create(null)
+                  const rows = await db.select().from(metadata).where(inArray(metadata.uid, [...storageToUid.keys()]))
+                  for (const row of rows) {
+                     const uid = storageToUid.get(row.uid)
+                     confirmedMetadata[uid] = externalizeMetadata(row, uid)
+                  }
+                  for (const uid of metadataUidList) {
+                     if (JSON.stringify(databaseMetadataDict[uid] ?? null) !== JSON.stringify(confirmedMetadata[uid] ?? null)) {
+                        throw snapshotChanged()
+                     }
+                  }
+               }
+               for (const value of confirmedValues) databaseValuesDict[value.uid] = value
+               return { databaseValuesDict, databaseMetadataDict, effectiveClientMetadata }
             }
+            let snapshot
+            for (let attempt = 0; ; attempt++) {
+               try { snapshot = await readSnapshot(); break } catch (error) {
+                  if (error.code !== 'sync-snapshot-changed' || attempt >= 2) throw error
+               }
+            }
+            const { databaseValuesDict, databaseMetadataDict, effectiveClientMetadata } = snapshot
 
             // STEP 3: compute sync result
             const result = computeSynchronization(databaseValuesDict, effectiveClientMetadata, databaseMetadataDict)

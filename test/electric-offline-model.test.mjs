@@ -165,6 +165,7 @@ test('offline sync rejects partial Shapes and supports local query filters', asy
       { streamOptions: { params: { columns: ['uid', 'qty'] } } },
       { url: '/electric/v1/shape/todos?columns=uid,qty' },
       { streamOptions: { params: { log: 'changes_only' } } },
+      { streamOptions: { log: 'changes_only' } },
       { streamOptions: { offset: 'now' } },
       { url: '/electric/v1/shape/todos?offset=100_0' },
       { streamOptions: { params: { subset__where: 'qty > 0' } } },

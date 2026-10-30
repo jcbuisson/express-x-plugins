@@ -395,7 +395,7 @@ function assertFullSyncShape(url, options) {
    const query = new URL(url ?? '', 'http://localhost').searchParams
    const keys = new Set([...Object.keys(params).filter(key => params[key] != null), ...query.keys()])
    if ([...keys].some(key => ['where', 'columns'].includes(key) || key.startsWith('subset__')) ||
-      [params.log, query.get('log')].some(value => value != null && value !== 'full') ||
+      [options.log, params.log, query.get('log')].some(value => value != null && value !== 'full') ||
       [options.offset, params.offset, query.get('offset')].some(value => value != null && String(value) !== '-1')) {
       throw new TypeError('Offline sync requires a complete Shape including tombstones; apply filters with findMany(where) or getObservable(where)')
    }

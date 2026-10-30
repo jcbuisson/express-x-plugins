@@ -72,28 +72,35 @@ export function electricClientPlugin(app, options = {}) {
          const filterParams = whereToElectricParams(where)
          return new ObservableClass(subscriber => {
             const cancellation = streamAbort(streamOptions.signal)
-            const stream = new ShapeStreamClass({
-               ...streamOptions,
-               signal: cancellation.signal,
-               url,
-               params: { ...streamOptions.params, ...filterParams },
-            })
-            const shape = new ShapeClass(stream)
-            let previous
-            const unsubscribe = shape.subscribe(({ rows }) => {
-               if (shape.error) { subscriber.error(shape.error); return }
-               const current = [...rows]
-               const serialized = JSON.stringify(current, (_key, value) => typeof value === 'bigint' ? String(value) : value)
-               if (serialized === previous) return
-               previous = serialized
-               subscriber.next(current)
-            })
-            // Shape exposes errors as state. ShapeStream retries transient failures;
-            // callers keep one observable subscription across reconnects
-            return () => {
-               unsubscribe()
-               stream.unsubscribeAll?.()
-               cancellation.abort()
+            let stream
+            let unsubscribe
+            const cleanup = () => {
+               try { unsubscribe?.() } finally {
+                  try { stream?.unsubscribeAll?.() } finally { cancellation.abort() }
+               }
+            }
+            try {
+               stream = new ShapeStreamClass({
+                  ...streamOptions,
+                  signal: cancellation.signal,
+                  url,
+                  params: { ...streamOptions.params, ...filterParams },
+               })
+               const shape = new ShapeClass(stream)
+               let previous
+               unsubscribe = shape.subscribe(({ rows }) => {
+                  if (shape.error) { subscriber.error(shape.error); return }
+                  const current = [...rows]
+                  const serialized = JSON.stringify(current, (_key, value) => typeof value === 'bigint' ? String(value) : value)
+                  if (serialized === previous) return
+                  previous = serialized
+                  subscriber.next(current)
+               })
+               // ShapeStream retries transient failures within this subscription.
+               return cleanup
+            } catch (error) {
+               cleanup()
+               throw error
             }
          })
       }

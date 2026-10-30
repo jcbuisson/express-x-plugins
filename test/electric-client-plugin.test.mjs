@@ -208,3 +208,26 @@ test('rejects an unsupported ID generation strategy', () => {
       /idGeneration/,
    )
 })
+
+test('failed observable setup closes the stream before a query is retried', async () => {
+   let fail = true
+   class TrackedStream extends FakeStream {
+      unsubscribeAll() { this.stopped = true }
+   }
+   class RecoveringShape extends FakeShape {
+      constructor(stream) {
+         if (fail) throw new Error('Shape initialization failed')
+         super(stream)
+      }
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: TrackedStream, Shape: RecoveringShape })
+   const model = app.createElectricModel('todos')
+   await assert.rejects(model.findMany(), /Shape initialization failed/)
+   const failed = FakeStream.instances.at(-1)
+   assert.equal(failed.options.signal.aborted, true)
+   assert.equal(failed.stopped, true)
+   fail = false
+   assert.deepEqual(await model.findMany(), [{ uid: 'one', completed: false }])
+   assert.notEqual(FakeStream.instances.at(-1), failed)
+})

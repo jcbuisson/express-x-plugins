@@ -475,3 +475,29 @@ test('network lifecycle preserves offline edits, transfers ownership and respect
       await first.disposeElectricSync(); await second.disposeElectricSync(); await db.close()
    }
 })
+
+test('managed writes capture input before deferred initialization', async () => {
+   const db = new PGlite()
+   let release
+   const gate = new Promise(resolve => { release = resolve })
+   const app = configure(undefined, new Locks(), {}, { createDatabase: async () => { await gate; return db }, network: { onLine: false } })
+   const model = app.createElectricModel('todos', { primaryKey: 'id' })
+   try {
+      const data = { title: 'accepted', details: { score: 1 } }
+      const creating = model.create(data)
+      data.title = 'mutated'
+      data.details.score = 2
+      release()
+      const row = await creating
+      assert.equal(row.title, 'accepted')
+      assert.deepEqual(row.details, { score: 1 })
+      const changes = { title: 'updated' }
+      const updating = model.update(row.id, changes)
+      changes.title = 'changed after invocation'
+      await updating
+      assert.equal((await model.findUnique({ id: row.id })).title, 'updated')
+   } finally {
+      release()
+      await app.disposeElectricSync()
+   }
+})

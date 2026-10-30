@@ -133,6 +133,8 @@ export function createManagedSync(options, createModel) {
       }
       function invoke(method, ...args) {
          if (disposed) return Promise.reject(new Error('Electric model has been disposed'))
+         // Read inputs at invocation time, before initialization can defer execution.
+         try { args = structuredClone(args) } catch (cause) { return Promise.reject(cause) }
          const invocation = ready.then(model => model[method](...args)).finally(() => invocations.delete(invocation))
          invocations.add(invocation)
          return invocation

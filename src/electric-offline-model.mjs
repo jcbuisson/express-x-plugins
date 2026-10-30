@@ -229,13 +229,13 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    async function runFlush(generation) {
       const deferred = new Set()
-      while (ownsSync && generation === streamGeneration) {
+      while (ownsSync && generation === streamGeneration && network?.onLine !== false) {
          const { rows } = await retryLeader(() => db.query(`SELECT * FROM electric_mutation_queue
             WHERE model_name = $1 AND status = 'pending' AND acknowledged_version IS NULL
               AND NOT (row_id = ANY($2::text[]))
             ORDER BY revision LIMIT 1`, [modelName, [...deferred]]))
          const mutation = rows[0]
-         if (!mutation || !ownsSync || generation !== streamGeneration) break
+         if (!mutation || !ownsSync || generation !== streamGeneration || network?.onLine === false) break
          try {
             const rejection = await sendMutation(mutation, generation)
             deferred.clear()
@@ -258,7 +258,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    async function sendMutation(mutation, generation) {
       const client = await retryLeader(() => db.query('SELECT id FROM electric_sync_client WHERE singleton = true'))
-      if (!ownsSync || generation !== streamGeneration) return
+      if (!ownsSync || generation !== streamGeneration || network?.onLine === false) return
       const metadata = { clientId: client.rows[0].id, revision: String(mutation.revision) }
       const { row_id: id, data, action } = mutation
       const result = action === 'create'

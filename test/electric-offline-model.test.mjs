@@ -646,3 +646,35 @@ test('large snapshots use three queries and preserve bigint versions and tombsto
       await db.close()
    }
 })
+
+test('a running flush pauses remaining mutations when the network goes offline', async () => {
+   const db = new PGlite()
+   const network = { onLine: true }
+   const calls = []
+   let finish
+   const app = { service: () => ({ async create(id) {
+      calls.push(id)
+      if (calls.length === 1) await new Promise(resolve => { finish = resolve })
+      return { version: String(calls.length) }
+   } }) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('todos', { primaryKey: 'id', localDb: db, network })
+   try {
+      await model.prepare()
+      await model.create({ title: 'first' })
+      await model.create({ title: 'second' })
+      const flushing = model.flushQueue()
+      while (!finish) await new Promise(resolve => setTimeout(resolve, 1))
+      network.onLine = false
+      finish()
+      await flushing
+      assert.equal(calls.length, 1)
+      network.onLine = true
+      await model.flushQueue()
+      assert.equal(calls.length, 2)
+   } finally {
+      model.stop()
+      await model.waitForIdle()
+      await db.close()
+   }
+})

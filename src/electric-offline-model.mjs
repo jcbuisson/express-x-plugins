@@ -3,9 +3,17 @@ import { Observable } from 'rxjs'
 import { streamAbort } from './electric-stream-abort.mjs'
 import { whereToElectricParams } from './electric-where.mjs'
 
+const databaseListeners = new WeakMap()
+
 /** Offline model backed by a shared PGlite database (normally PGliteWorker). */
-export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs, streamOptions = {}, onError }) {
+export function createOfflineElectricModel({ db, service, modelName, url, primaryKey, ShapeStreamClass, ShapeClass, ownsSync, channel, network, retryMs, streamOptions = {}, onError, relations = [] }) {
    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(primaryKey)) throw new TypeError('primaryKey must be a simple SQL identifier')
+   relations = relations.map(relation => {
+      if (!relation || !['child', 'parent', 'column'].every(key => typeof relation[key] === 'string' && relation[key].length)) {
+         throw new TypeError('relations require child, parent and column model/field names')
+      }
+      return { ...relation }
+   })
    assertFullSyncShape(url, streamOptions)
    streamOptions = { ...streamOptions, params: { ...streamOptions.params } }
    let snapshot = null
@@ -28,7 +36,8 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       pendingBackground.add(promise)
       void promise.catch(report).finally(() => pendingBackground.delete(promise))
    }
-   const listeners = new Set()
+   let listeners = databaseListeners.get(db)
+   if (!listeners) databaseListeners.set(db, listeners = new Set())
 
    async function prepare() {
       await retryLeader(() => db.exec(`
@@ -38,6 +47,10 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
             id UUID NOT NULL DEFAULT gen_random_uuid()
          );
          INSERT INTO electric_sync_client (singleton) VALUES (true) ON CONFLICT DO NOTHING;
+         CREATE TABLE IF NOT EXISTS electric_local_deletions (
+            model_name TEXT NOT NULL, row_id TEXT NOT NULL,
+            PRIMARY KEY (model_name, row_id)
+         );
          CREATE TABLE IF NOT EXISTS electric_local_rows (
             model_name TEXT NOT NULL, row_id TEXT NOT NULL, data JSONB NOT NULL,
             bigint_columns TEXT[] NOT NULL DEFAULT '{}',
@@ -68,7 +81,21 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    async function findMany(where = {}) {
       whereToElectricParams(where)
-      const { rows } = await retryLeader(() => db.query('SELECT data, bigint_columns FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', [modelName]))
+      const { rows } = await retryLeader(() => db.query(relations.length ? `WITH RECURSIVE hidden(model_name, row_id) AS (
+         SELECT model_name, row_id FROM electric_local_deletions
+         UNION
+         SELECT model_name, row_id FROM electric_mutation_queue WHERE action = 'delete'
+         UNION
+         SELECT child.model_name, child.row_id
+         FROM hidden AS parent
+         JOIN jsonb_to_recordset($2::jsonb) AS relation(child text, parent text, "column" text)
+            ON relation.parent = parent.model_name
+         JOIN electric_local_rows AS child ON child.model_name = relation.child
+            AND child.data->>relation."column" = parent.row_id
+      ) SELECT local.data, local.bigint_columns FROM electric_local_rows AS local
+      WHERE local.model_name = $1 AND NOT EXISTS (
+         SELECT 1 FROM hidden WHERE hidden.model_name = local.model_name AND hidden.row_id = local.row_id
+      ) ORDER BY local.row_id` : 'SELECT data, bigint_columns FROM electric_local_rows WHERE model_name = $1 ORDER BY row_id', relations.length ? [modelName, json(relations)] : [modelName]))
       return rows.filter(row => matchesWhere(row.data, where, new Set(row.bigint_columns))).map(row => row.data)
    }
 
@@ -145,6 +172,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       assertId(id)
       await db.transaction(async tx => {
          await tx.query('DELETE FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])
+         await tx.query('INSERT INTO electric_local_deletions VALUES ($1, $2) ON CONFLICT DO NOTHING', [modelName, String(id)])
          await queueMutation(tx, id, 'delete', null)
       })
       notify()
@@ -188,6 +216,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       await retryLeader(() => db.transaction(async tx => {
          // Send the snapshot once instead of making two worker round trips per row.
          const incoming = json(rows)
+         if (relations.length) await tx.query(`INSERT INTO electric_local_deletions (model_name, row_id)
+            SELECT $1, incoming.data->>$3 FROM jsonb_array_elements($2::jsonb) AS incoming(data)
+            WHERE incoming.data->>'deleted' = 'true' ON CONFLICT DO NOTHING`, [modelName, incoming, primaryKey])
          const types = json(Object.fromEntries(rows.map(row => [String(row[primaryKey]), bigintColumns(row)])))
          await tx.query(`DELETE FROM electric_mutation_queue AS pending
             USING jsonb_array_elements($2::jsonb) AS incoming(data)
@@ -378,7 +409,11 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    function online() { background(flushQueue()) }
    function sharedChange(event) {
-      if (event.data?.modelName !== modelName) return
+      if (!event.data?.modelName) return
+      if (event.data.modelName !== modelName) {
+         for (const listener of listeners) queueMicrotask(listener)
+         return
+      }
       if (!ownsSync && typeof event.data.online === 'boolean') connected = event.data.online
       if (ownsSync && event.data.requestStatus) notify()
       for (const listener of listeners) queueMicrotask(() => { try { listener() } catch (error) { console.error(error) } })

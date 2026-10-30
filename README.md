@@ -501,3 +501,31 @@ Restored from the last committed custom implementations, dated July 8, 2026:
 **944c398** (client), and `express-x-drizzle` **ddf6804** (server). The algorithm
 was removed from Express-X in **47c2293** on July 19. Only module imports and
 plugin export aliases were adapted; the synchronization logic is preserved.
+
+### Local cascade visibility
+
+Configure the client with the same CASCADE relationships as the server schema:
+
+```js
+electricClientPlugin(app, {
+   sync: true,
+   databaseName: 'my-app',
+   relations: [
+      { child: 'user_group_relation', parent: 'group', column: 'group_uid' },
+      { child: 'user_group_relation', parent: 'user', column: 'user_uid' },
+   ],
+})
+```
+
+Names identify client models, and `column` is the child's foreign key referencing
+its parent's configured primary key. This applies to offline models sharing a
+local database, including managed sync. `findMany`, `findUnique` and observables
+hide descendants of locally deleted parents immediately, including transitive
+cascades. Managed tabs broadcast changes across models. Missing parents alone do
+not hide rows: Shapes can arrive in any order. Nullable foreign keys remain visible.
+The plugin retains local deletion markers across reloads and acknowledgement so
+children stay hidden until their server tombstones arrive. Only the parent delete
+is queued; the server still discovers PostgreSQL CASCADE constraints and writes
+the authoritative tombstones. Relationship configuration is explicit on the client;
+it is not downloaded from the server. Direct models without a local database are
+unaffected.

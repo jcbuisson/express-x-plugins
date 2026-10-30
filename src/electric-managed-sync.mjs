@@ -69,7 +69,7 @@ export function createManagedSync(options, createModel) {
          try { (modelOptions.onError ?? options.onError)?.(cause, { modelName: name }) } catch (callbackError) { console.error(callbackError) }
       }
       const ready = getDatabase().then(async db => {
-         channel = new Channel(`express-x:${databaseName}:${name}`)
+         channel = new Channel(`express-x:${databaseName}:changes`)
          // The sync owner serves every tab, even while its own tab is hidden.
          const streamOptions = {
             ...modelOptions.streamOptions,

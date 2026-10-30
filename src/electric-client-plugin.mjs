@@ -44,6 +44,7 @@ export function electricClientPlugin(app, options = {}) {
       if (modelOptions.localDb) return createOfflineElectricModel({
          db: modelOptions.localDb, service, modelName, url,
          primaryKey: modelOptions.primaryKey ?? 'uid',
+         relations: options.relations ?? [],
          ShapeStreamClass, ShapeClass,
          ownsSync: modelOptions.ownsSync ?? true,
          channel: modelOptions.channel,

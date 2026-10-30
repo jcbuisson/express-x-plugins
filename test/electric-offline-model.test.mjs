@@ -712,3 +712,43 @@ test('stop cancels a manual flush even before the Shape stream has started', asy
       await db.close()
    }
 })
+
+test('nested mutation inputs cannot diverge between the local row and upload queue', async () => {
+   const db = new PGlite()
+   const input = { details: { value: 'created' } }
+   const changes = { details: { value: 'updated' } }
+   let changeDuringWrite
+   const wrapped = {
+      exec: db.exec.bind(db), query: db.query.bind(db),
+      transaction: callback => db.transaction(tx => callback({ query: async (...args) => {
+         const result = await tx.query(...args)
+         if (changeDuringWrite && /^(INSERT INTO|UPDATE) electric_local_rows/.test(args[0])) {
+            changeDuringWrite()
+            changeDuringWrite = undefined
+         }
+         return result
+      } })),
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('todos', { localDb: wrapped, network: { onLine: false } })
+   try {
+      await model.prepare()
+      changeDuringWrite = () => { input.details.value = 'changed after create' }
+      const row = await model.create(input)
+      assert.equal((await model.findUnique({ uid: row.uid })).details.value, 'created')
+      let queued = (await db.query('SELECT data FROM electric_mutation_queue')).rows[0].data
+      assert.equal(queued.details.value, 'created')
+      assert.equal(row.details.value, 'created')
+      changeDuringWrite = () => { changes.details.value = 'changed after update' }
+      const updated = await model.update(row.uid, changes)
+      assert.equal((await model.findUnique({ uid: row.uid })).details.value, 'updated')
+      queued = (await db.query('SELECT data FROM electric_mutation_queue')).rows[0].data
+      assert.equal(queued.details.value, 'updated')
+      assert.equal(updated.details.value, 'updated')
+   } finally {
+      model.stop()
+      await model.waitForIdle()
+      await db.close()
+   }
+})

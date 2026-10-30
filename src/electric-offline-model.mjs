@@ -105,7 +105,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       const id = data[primaryKey] ?? globalThis.crypto?.randomUUID?.()
       if (!id) throw new Error('crypto.randomUUID() is required')
       assertId(id)
-      const row = { ...data, [primaryKey]: id }
+      const row = { ...structuredClone(data), [primaryKey]: id }
       await db.transaction(async tx => {
          await tx.query('INSERT INTO electric_local_rows (model_name, row_id, data, bigint_columns) VALUES ($1, $2, $3::jsonb, $4::text[])',
             [modelName, String(id), json(row), bigintColumns(row)])
@@ -120,7 +120,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       assertId(id)
       assertData(data)
       if (primaryKey in data || 'version' in data || 'deleted' in data) throw new TypeError('sync-managed columns cannot be updated')
-      const changes = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined))
+      const changes = structuredClone(Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined)))
       let row
       await db.transaction(async tx => {
          const current = await tx.query('SELECT data, bigint_columns FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, String(id)])

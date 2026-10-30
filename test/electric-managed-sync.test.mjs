@@ -501,3 +501,32 @@ test('managed writes capture input before deferred initialization', async () => 
       await app.disposeElectricSync()
    }
 })
+
+test('an explicit start retries ownership after a failed Web Lock request', async () => {
+   const db = new PGlite()
+   const errors = []
+   class RecoveringLocks extends Locks {
+      attempts = 0
+      request(...args) {
+         this.attempts++
+         if (this.attempts === 1) return Promise.reject(new Error('temporary lock failure'))
+         return super.request(...args)
+      }
+   }
+   const locks = new RecoveringLocks()
+   const app = configure(db, locks, {}, { onError: error => errors.push(error) })
+   const before = Stream.instances.length
+   try {
+      const model = app.createElectricModel('todos')
+      await model.prepare()
+      await until(() => errors.length === 1)
+      assert.equal(errors[0].message, 'temporary lock failure')
+      assert.equal(Stream.instances.length, before)
+      await model.start()
+      await until(() => Stream.instances.length === before + 1)
+      assert.equal(locks.attempts, 2)
+   } finally {
+      await app.disposeElectricSync()
+      await db.close()
+   }
+})

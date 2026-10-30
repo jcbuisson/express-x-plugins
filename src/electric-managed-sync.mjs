@@ -104,6 +104,10 @@ export function createManagedSync(options, createModel) {
                await offline.waitForIdle()
                if (generation === ownerGeneration) { offline.setSyncOwner(false); release = undefined }
             }
+         }).finally(() => {
+            // A settled request no longer owns or waits for this lock. In
+            // particular, a failed request must permit an explicit start retry.
+            if (generation === ownerGeneration) controller = undefined
          }).catch(cause => { if (cause.name !== 'AbortError') report(cause) })
       }
       function releaseOwnership() {

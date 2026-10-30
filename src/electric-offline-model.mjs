@@ -305,6 +305,15 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    function start() {
       if (started) return
+      try {
+         startStream()
+      } catch (error) {
+         stop()
+         throw error
+      }
+   }
+
+   function startStream() {
       started = true
       channel?.addEventListener('message', sharedChange)
       globalThis.addEventListener?.('online', online)
@@ -359,6 +368,8 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       clearInterval(timer)
       stream?.unsubscribeAll()
       cancellation?.abort()
+      stream = undefined
+      cancellation = undefined
       channel?.removeEventListener('message', sharedChange)
       globalThis.removeEventListener?.('online', online)
       connected = false

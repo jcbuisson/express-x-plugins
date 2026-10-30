@@ -752,3 +752,39 @@ test('nested mutation inputs cannot diverge between the local row and upload que
       await db.close()
    }
 })
+
+test('failed stream startup releases resources and permits a later start', async () => {
+   const db = new PGlite()
+   let fail = true
+   class RecoveringShape extends Shape {
+      constructor(stream) {
+         if (fail) throw new Error('Shape initialization failed')
+         super(stream)
+      }
+   }
+   class TrackedStream extends Stream {
+      unsubscribeAll() { this.stopped = true }
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: TrackedStream, Shape: RecoveringShape })
+   const model = app.createElectricModel('todos', { localDb: db, retryMs: 60_000 })
+   try {
+      await model.prepare()
+      assert.throws(() => model.start(), /Shape initialization failed/)
+      const failed = Stream.current
+      assert.equal(failed.options.signal.aborted, true)
+      assert.equal(failed.stopped, true)
+      assert.equal((await model.getStatus()).online, false)
+      fail = false
+      model.start()
+      assert.notEqual(Stream.current, failed)
+      assert.equal(Stream.current.options.signal.aborted, false)
+      Shape.current.emit({ rows: [{ uid: crypto.randomUUID(), title: 'recovered', version: 1n, deleted: false }] })
+      await model.waitForIdle()
+      assert.equal((await model.findMany())[0].title, 'recovered')
+   } finally {
+      model.stop()
+      await model.waitForIdle()
+      await db.close()
+   }
+})

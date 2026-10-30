@@ -678,3 +678,36 @@ test('a running flush pauses remaining mutations when the network goes offline',
       await db.close()
    }
 })
+
+test('stop cancels a manual flush even before the Shape stream has started', async () => {
+   const db = new PGlite()
+   const calls = []
+   let release
+   const app = { service: () => ({ async create(id) {
+      calls.push(id)
+      if (calls.length === 1) await new Promise(resolve => { release = resolve })
+      return { version: String(calls.length) }
+   } }) }
+   electricClientPlugin(app, { ShapeStream: Stream, Shape })
+   const model = app.createElectricModel('todos', { primaryKey: 'id', localDb: db })
+   try {
+      await model.prepare()
+      await model.create({ title: 'first' })
+      await model.create({ title: 'second' })
+      const flushing = model.flushQueue()
+      while (!release) await new Promise(resolve => setTimeout(resolve, 1))
+      model.stop()
+      release()
+      await flushing
+      await model.waitForIdle()
+      assert.equal(calls.length, 1)
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM electric_mutation_queue WHERE acknowledged_version IS NULL')).rows[0].count, 1)
+      await model.flushQueue()
+      assert.equal(calls.length, 2)
+   } finally {
+      release?.()
+      model.stop()
+      await model.waitForIdle()
+      await db.close()
+   }
+})

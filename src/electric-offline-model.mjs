@@ -349,7 +349,8 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    function stop() {
-      if (!started) return
+      // Explicit flushes can run before start(); invalidate those requests too.
+      if (!started) { ++streamGeneration; return }
       started = false
       ++streamGeneration
       // Drain previously queued snapshots, then invalidate this stream's view

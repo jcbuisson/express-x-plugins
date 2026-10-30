@@ -245,6 +245,12 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
          result = await writeTombstone(tx, model, id)
       }
 
+      // Defaults and triggers can assign a parent absent from the request (or
+      // replace the requested parent). Validate the stored row before commit.
+      if (result && !result.deleted) {
+         const storedRejection = await relations.deletedParent(tx, model, 'update', id, {}, false)
+         if (storedRejection) result = { ...await writeTombstone(tx, model, id), syncRejection: storedRejection }
+      }
       if (result?.deleted) await relations.cascade(tx, model, id, writeTombstone)
       result = normalizeBigInts(result)
       await tx.query(`UPDATE electric_mutation_cursor SET revision = $4, result = $5::jsonb

@@ -249,3 +249,33 @@ test('offline rejected memberships disappear immediately, report a conflict, and
    assert.equal((await model.getStatus()).pending, 0)
    assert.equal((await model.findMany()).length, 0)
 })
+
+test('defaults and triggers cannot leave live children referencing deleted parents', async t => {
+   const { db, services, metadata, user, group } = await fixture(t)
+   await services.get('group').delete(group, metadata())
+   await db.exec(`ALTER TABLE membership ALTER COLUMN group_uid SET DEFAULT '${group}'::uuid`)
+   const request = [crypto.randomUUID(), { user_uid: user }, metadata()]
+   const rejected = await services.get('membership').create(...request)
+   assert.equal(rejected.deleted, true)
+   assert.equal(rejected.syncRejection.code, 'sync-parent-deleted')
+   assert.deepEqual(await services.get('membership').create(...request), rejected)
+
+   const membership = crypto.randomUUID()
+   const note = crypto.randomUUID()
+   await services.get('membership').create(membership, { user_uid: user, group_uid: null }, metadata())
+   await services.get('note').create(note, { membership_uid: membership }, metadata())
+   await db.exec(`CREATE FUNCTION redirect_membership() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+         IF NOT NEW.deleted AND NEW.label = 'redirect' THEN NEW.group_uid := '${group}'::uuid; END IF;
+         RETURN NEW;
+      END $$;
+      CREATE TRIGGER redirect_membership BEFORE UPDATE ON membership
+         FOR EACH ROW EXECUTE FUNCTION redirect_membership()`)
+   const updateRequest = [membership, { label: 'redirect' }, metadata()]
+   const updated = await services.get('membership').update(...updateRequest)
+   assert.equal(updated.deleted, true)
+   assert.equal(updated.syncRejection.code, 'sync-parent-deleted')
+   assert.deepEqual(await services.get('membership').update(...updateRequest), updated)
+   assert.equal((await db.query('SELECT deleted FROM note WHERE id = $1', [note])).rows[0].deleted, true)
+   assert.equal((await db.query('SELECT count(*)::int AS count FROM membership WHERE NOT deleted')).rows[0].count, 0)
+})

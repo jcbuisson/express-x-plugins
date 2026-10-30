@@ -1,4 +1,6 @@
 import { discoverSyncRelations } from './electric-sync-relations.mjs'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 /**
  * Register Express-X mutation services and an Electric Shape proxy.
@@ -155,7 +157,12 @@ export function electricServerPlugin(app, db, models, options = {}) {
             const upstream = await fetchImpl(target, { signal: controller.signal, headers: { accept: request.get('accept') ?? '*/*' } })
             response.status(upstream.status)
             copyResponseHeaders(upstream, response)
-            response.send(Buffer.from(await upstream.arrayBuffer()))
+            if (upstream.body && upstream.headers.get('content-type')?.split(';')[0].trim().toLowerCase() === 'text/event-stream') {
+               response.flushHeaders?.()
+               await pipeline(Readable.fromWeb(upstream.body), response)
+            } else {
+               response.send(Buffer.from(await upstream.arrayBuffer()))
+            }
          } finally {
             response.off?.('close', abort)
          }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
+import { Writable } from 'node:stream'
 import { PGlite } from '@electric-sql/pglite'
 
 import { electricServerPlugin, prepareElectricSyncSchema } from '../src/electric-server-plugin.mjs'
@@ -363,4 +364,44 @@ test('server models default to the uid primary key', () => {
    const app = { createService() {}, get() {} }
    const result = electricServerPlugin(app, { query() {} }, ['users'], { authorize: async () => true })
    assert.equal(result.models[0].primaryKey, 'uid')
+})
+
+
+test('the Shape proxy forwards SSE events before the upstream stream closes', async () => {
+   let upstream
+   let wrote
+   const firstWrite = new Promise(resolve => { wrote = resolve })
+   const body = new ReadableStream({ start(controller) {
+      upstream = controller
+      controller.enqueue(new TextEncoder().encode('data: first\n\n'))
+   } })
+   const { routes } = fixture({ fetch: async () => new Response(body, {
+      headers: { 'content-type': 'text/event-stream' },
+   }) })
+   const chunks = []
+   const response = new Writable({ write(chunk, _encoding, done) {
+      chunks.push(chunk.toString()); wrote(true); done()
+   } })
+   response.status = () => response
+   response.setHeader = () => {}
+   response.send = chunk => response.end(chunk)
+   const errors = []
+   const handling = routes.get('/electric/v1/shape/:model')({
+      params: { model: 'todos' }, query: { live_sse: 'true' }, get: () => 'text/event-stream',
+   }, response, error => errors.push(error))
+   let timer
+   try {
+      const delivered = await Promise.race([firstWrite,
+         new Promise(resolve => { timer = setTimeout(() => resolve(false), 100) }),
+      ])
+      assert.equal(delivered, true, 'first event must arrive while upstream remains open')
+      assert.equal(chunks.join(''), 'data: first\n\n')
+      upstream.enqueue(new TextEncoder().encode('data: second\n\n'))
+   } finally {
+      clearTimeout(timer)
+      upstream.close()
+      await handling
+   }
+   assert.equal(chunks.join(''), 'data: first\n\ndata: second\n\n')
+   assert.deepEqual(errors, [])
 })

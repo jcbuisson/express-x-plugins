@@ -125,12 +125,15 @@ test('shared queries cancel their request only after the last subscriber and pre
    second.unsubscribe()
    assert.equal(stream.options.signal.aborted, true)
    assert.equal(external.signal.aborted, false)
-   const next = model.getObservable().subscribe()
+   const errors = []
+   const next = model.getObservable().subscribe({ error: error => errors.push(error) })
    const restarted = FakeStream.instances.at(-1)
    assert.equal(restarted.options.signal.aborted, false)
    external.abort('caller stopped')
    assert.equal(restarted.options.signal.aborted, true)
    assert.equal(restarted.options.signal.reason, 'caller stopped')
+   assert.deepEqual(errors, ['caller stopped'])
+   assert.equal(next.closed, true)
    next.unsubscribe()
 })
 
@@ -230,4 +233,21 @@ test('failed observable setup closes the stream before a query is retried', asyn
    fail = false
    assert.deepEqual(await model.findMany(), [{ uid: 'one', completed: false }])
    assert.notEqual(FakeStream.instances.at(-1), failed)
+})
+
+test('caller cancellation rejects a pending Shape read and releases its subscription', { timeout: 1000 }, async () => {
+   const external = new AbortController()
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, { ShapeStream: FakeStream, Shape: DeferredShape })
+   const model = app.createElectricModel('todos', { streamOptions: { signal: external.signal } })
+   const reading = model.findMany()
+   const rejected = assert.rejects(reading, error => error === external.signal.reason)
+   const stream = FakeStream.instances.at(-1)
+   external.abort(new Error('caller cancelled'))
+   await rejected
+   assert.equal(stream.shape.unsubscribed, true)
+   assert.equal(stream.options.signal.aborted, true)
+   const count = FakeStream.instances.length
+   await assert.rejects(model.findMany(), error => error === external.signal.reason)
+   assert.equal(FakeStream.instances.length, count)
 })

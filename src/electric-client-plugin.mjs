@@ -75,12 +75,19 @@ export function electricClientPlugin(app, options = {}) {
             const cancellation = streamAbort(streamOptions.signal)
             let stream
             let unsubscribe
+            const onAbort = () => subscriber.error(cancellation.signal.reason)
             const cleanup = () => {
+               cancellation.signal.removeEventListener('abort', onAbort)
                try { unsubscribe?.() } finally {
                   try { stream?.unsubscribeAll?.() } finally { cancellation.abort() }
                }
             }
             try {
+               cancellation.signal.addEventListener('abort', onAbort, { once: true })
+               if (cancellation.signal.aborted) {
+                  onAbort()
+                  return cleanup
+               }
                stream = new ShapeStreamClass({
                   ...streamOptions,
                   signal: cancellation.signal,

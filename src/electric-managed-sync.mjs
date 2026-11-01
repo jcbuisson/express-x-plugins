@@ -2,6 +2,7 @@ import { Observable } from 'rxjs'
 
 /** One database and one cached model per plugin instance. Browser locks span tabs. */
 export function createManagedSync(options, createModel) {
+   options = { ...options }
    const databaseName = options.databaseName
    if (typeof databaseName !== 'string' || !databaseName.trim()) {
       throw new TypeError('sync: true requires a non-empty databaseName')

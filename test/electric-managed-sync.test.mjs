@@ -558,3 +558,42 @@ test('managed models capture configuration before deferred database initializati
       await app.disposeElectricSync()
    }
 })
+
+test('managed plugins retain the configured database when the caller reuses its options', async () => {
+   const first = new PGlite(), second = new PGlite()
+   const options = {
+      sync: true, databaseName: 'captured-db', localDb: first, network: { onLine: false },
+      locks: new Locks(), BroadcastChannel: Channel, ShapeStream: Stream, Shape,
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, options)
+   try {
+      options.localDb = second
+      const model = app.createElectricModel('todos')
+      await model.prepare()
+      assert.equal((await first.query("SELECT to_regclass('electric_local_rows') IS NOT NULL AS prepared")).rows[0].prepared, true)
+      assert.equal((await second.query("SELECT to_regclass('electric_local_rows') IS NOT NULL AS prepared")).rows[0].prepared, false)
+   } finally {
+      await app.disposeElectricSync()
+      await first.close(); await second.close()
+   }
+})
+
+test('managed disposal keeps caller database ownership after the options object changes', async () => {
+   const db = new PGlite()
+   const options = {
+      sync: true, databaseName: 'caller-owned-db', localDb: db, network: { onLine: false },
+      locks: new Locks(), BroadcastChannel: Channel, ShapeStream: Stream, Shape,
+   }
+   const app = { service: () => ({}) }
+   electricClientPlugin(app, options)
+   try {
+      await app.createElectricModel('todos').prepare()
+      delete options.localDb
+      await app.disposeElectricSync()
+      assert.equal(db.closed, false)
+   } finally {
+      await app.disposeElectricSync()
+      if (!db.closed) await db.close()
+   }
+})

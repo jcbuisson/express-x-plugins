@@ -307,6 +307,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          if (String(queued.revision) === String(mutation.revision) && queued.action === action) {
             await tx.query(`UPDATE electric_mutation_queue SET acknowledged_version = $3::numeric
                WHERE model_name = $1 AND row_id = $2`, [modelName, id, String(result.version)])
+            if (result.deleted) {
+               await tx.query('INSERT INTO electric_local_deletions (model_name, row_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [modelName, id])
+            }
             if (result.deleted && action !== 'delete') {
                await tx.query('DELETE FROM electric_local_rows WHERE model_name = $1 AND row_id = $2', [modelName, id])
                discarded = true

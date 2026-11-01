@@ -530,3 +530,31 @@ test('an explicit start retries ownership after a failed Web Lock request', asyn
       await db.close()
    }
 })
+
+test('managed models capture configuration before deferred database initialization', async () => {
+   const db = new PGlite()
+   let release
+   const gate = new Promise(resolve => { release = resolve })
+   const app = configure(undefined, new Locks(), { async create() { return { version: '1' } } }, {
+      createDatabase: async () => { await gate; return db },
+   })
+   const before = Stream.instances.length
+   try {
+      const options = { primaryKey: 'id', streamOptions: { params: { replica: 'full' } } }
+      const model = app.createElectricModel('todos', options)
+      const creating = model.create({ title: 'accepted before preparation' })
+      options.primaryKey = 'uid'
+      options.streamOptions.params.replica = 'default'
+      release()
+      const row = await creating
+      assert.equal(typeof row.id, 'string')
+      assert.equal(row.uid, undefined)
+      assert.equal(app.createElectricModel('todos', { primaryKey: 'id' }), model)
+      await until(() => Stream.instances.length === before + 1)
+      assert.equal(Stream.instances.at(-1).options.params.replica, 'full')
+      assert.equal((await model.findUnique({ id: row.id })).title, row.title)
+   } finally {
+      release()
+      await app.disposeElectricSync()
+   }
+})

@@ -51,6 +51,13 @@ export function createManagedSync(options, createModel) {
          if (existing.primaryKey !== (modelOptions.primaryKey ?? 'uid')) throw new TypeError('A cached sync model cannot change primaryKey')
          return existing.api
       }
+      modelOptions = { ...modelOptions }
+      if (modelOptions.streamOptions) {
+         modelOptions.streamOptions = {
+            ...modelOptions.streamOptions,
+            params: { ...modelOptions.streamOptions.params },
+         }
+      }
       let active = true
       let disposed = false
       let disposal

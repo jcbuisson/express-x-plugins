@@ -137,6 +137,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
       await db.transaction(async tx => {
          await tx.query('INSERT INTO electric_local_rows (model_name, row_id, data, bigint_columns) VALUES ($1, $2, $3::jsonb, $4::text[])',
             [modelName, String(id), json(row), bigintColumns(row)])
+         await tx.query('DELETE FROM electric_local_deletions WHERE model_name = $1 AND row_id = $2', [modelName, id])
          await queueMutation(tx, id, 'create', row)
       })
       notify()

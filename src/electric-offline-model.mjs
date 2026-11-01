@@ -92,7 +92,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
          JOIN jsonb_to_recordset($2::jsonb) AS relation(child text, parent text, "column" text)
             ON relation.parent = parent.model_name
          JOIN electric_local_rows AS child ON child.model_name = relation.child
-            AND child.data->>relation."column" = parent.row_id
+            AND CASE WHEN pg_input_is_valid(child.data->>relation."column", 'uuid')
+               THEN (child.data->>relation."column")::uuid::text
+               ELSE child.data->>relation."column" END = parent.row_id
       ) SELECT local.data, local.bigint_columns FROM electric_local_rows AS local
       WHERE local.model_name = $1 AND NOT EXISTS (
          SELECT 1 FROM hidden WHERE hidden.model_name = local.model_name AND hidden.row_id = local.row_id

@@ -19,6 +19,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    let snapshot = null
    let operation = Promise.resolve()
    let flushPromise
+   let flushRequested = false
    let started = false
    let connected = false
    let timer
@@ -256,9 +257,23 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    function flushQueue() {
-      if (flushPromise) return flushPromise
+      if (flushPromise) {
+         flushRequested = true
+         return flushPromise
+      }
       if (!ownsSync || network?.onLine === false) return Promise.resolve()
-      flushPromise = runFlush(streamGeneration).finally(() => { flushPromise = undefined })
+      flushPromise = (async () => {
+         try {
+            do {
+               flushRequested = false
+               await runFlush(streamGeneration)
+            } while (flushRequested && ownsSync && network?.onLine !== false)
+         } finally {
+            // Check the request flag and release the promise in the same turn
+            // so a write cannot join a completed flush and lose its wakeup.
+            flushPromise = undefined
+         }
+      })()
       return flushPromise
    }
 
@@ -396,6 +411,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    function stop() {
+      flushRequested = false
       // Explicit flushes can run before start(); invalidate those requests too.
       if (!started) { ++streamGeneration; return }
       started = false

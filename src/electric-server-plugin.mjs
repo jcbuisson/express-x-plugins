@@ -141,6 +141,7 @@ export function electricServerPlugin(app, db, models, options = {}) {
          const model = configuredModels.find(candidate => candidate.name === request.params.model)
          if (!model) return response.status(404).json({ error: 'unknown model' })
          await authorize({ app, request, response, transport: 'http' }, model.name, 'shape', [request.query])
+         if (response.destroyed) return
          const target = new URL(electricUrl)
          for (const [key, value] of Object.entries(request.query)) {
             if (key === 'table') continue

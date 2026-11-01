@@ -405,3 +405,31 @@ test('the Shape proxy forwards SSE events before the upstream stream closes', as
    assert.equal(chunks.join(''), 'data: first\n\ndata: second\n\n')
    assert.deepEqual(errors, [])
 })
+
+test('a disconnect during authorization does not start an upstream Shape request', async () => {
+   let authorize
+   let entered
+   const authorizing = new Promise(resolve => { entered = resolve })
+   const authorization = new Promise(resolve => { authorize = resolve })
+   let fetched = false
+   const { routes } = fixture({
+      async authorize() { entered(); return authorization },
+      async fetch() { fetched = true; return new Response('[]') },
+   })
+   const response = new EventEmitter()
+   response.status = () => response
+   response.setHeader = () => {}
+   response.send = () => {}
+   const errors = []
+   const handling = routes.get('/electric/v1/shape/:model')({
+      params: { model: 'todos' }, query: {}, get: () => undefined,
+   }, response, error => errors.push(error))
+   await authorizing
+   response.destroyed = true
+   response.emit('close')
+   authorize(true)
+   await handling
+   assert.equal(fetched, false)
+   assert.equal(response.listenerCount('close'), 0)
+   assert.deepEqual(errors, [])
+})

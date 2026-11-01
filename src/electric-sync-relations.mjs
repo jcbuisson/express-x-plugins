@@ -49,7 +49,11 @@ export async function discoverSyncRelations(db, models) {
          if (parentId == null) continue
          const { parent } = relation
          // PostgreSQL permits a newly inserted row to reference itself.
-         if (parent.table === model.table && String(parentId) === String(id)) continue
+         if (parent.table === model.table) {
+            if (parentId === id) continue
+            const self = await tx.query('SELECT $1::uuid = $2::uuid AS same', [parentId, id])
+            if (self.rows[0].same) continue
+         }
          const result = await tx.query(`SELECT deleted FROM ${parent.quotedTable} WHERE ${parent.quotedPrimaryKey} = $1 FOR UPDATE`, [parentId])
          if (!result.rows[0]) {
             // The parent may still be queued on another model. Retry rather than

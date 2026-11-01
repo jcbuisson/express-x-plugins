@@ -279,3 +279,21 @@ test('defaults and triggers cannot leave live children referencing deleted paren
    assert.equal((await db.query('SELECT deleted FROM note WHERE id = $1', [note])).rows[0].deleted, true)
    assert.equal((await db.query('SELECT count(*)::int AS count FROM membership WHERE NOT deleted')).rows[0].count, 0)
 })
+
+test('self-referencing creates compare UUID foreign keys using PostgreSQL semantics', async t => {
+   const db = new PGlite()
+   t.after(() => db.close())
+   await db.exec('CREATE TABLE nodes (uid UUID PRIMARY KEY, parent_uid UUID REFERENCES nodes(uid) ON DELETE CASCADE)')
+   const models = [{ name: 'nodes', tombstoneData: { parent_uid: null } }]
+   await prepareElectricSyncSchema(db, models)
+   let service
+   electricServerPlugin({ createService(_name, methods) { service = methods }, get() {} }, poolFor(db), models, { sync: true })
+   for (const format of [id => id.toUpperCase(), id => `{${id}}`, id => id.replaceAll('-', '')]) {
+      const id = `a${crypto.randomUUID().slice(1)}`
+      const request = [id, { parent_uid: format(id) }, { clientId: crypto.randomUUID(), revision: '1' }]
+      const created = await service.create(...request)
+      assert.equal(created.deleted, false)
+      assert.equal(created.parent_uid, id)
+      assert.deepEqual(await service.create(...request), created)
+   }
+})

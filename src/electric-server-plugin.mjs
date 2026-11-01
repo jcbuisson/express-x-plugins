@@ -224,6 +224,12 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
       if (rejection) {
          result = { ...await writeTombstone(tx, model, id), syncRejection: rejection }
 
+      } else if (action === 'create' && !editedCreate && BigInt(cursor.revision) > 0n) {
+         // An ID-only create by a client that already wrote this row is a no-op.
+         // Avoid INSERT: NOT NULL checks run before conflict handling.
+         const existing = await tx.query(`SELECT * FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 FOR UPDATE`, [id])
+         result = existing.rows[0] ?? await writeTombstone(tx, model, id)
+
       } else if (action === 'create' && !editedCreate) {
          const entries = Object.entries({ ...data, [model.primaryKey]: id }).filter(([, value]) => value !== undefined)
          const columns = entries.map(([column]) => quoteIdentifier(column, 'data column'))
@@ -236,9 +242,7 @@ async function syncMutation(db, model, action, id, data, mutation, relations) {
          if (!result) {
             const existing = await tx.query(`SELECT * FROM ${model.quotedTable} WHERE ${model.quotedPrimaryKey} = $1 FOR UPDATE`, [id])
             result = existing.rows[0]
-            // A newer ID-only create by a client that already wrote this row
-            // is a no-op. A first create from another client still conflicts.
-            if (!result?.deleted && BigInt(cursor.revision) === 0n) {
+            if (!result?.deleted) {
                const error = new Error(`Cannot create '${model.name}': row '${id}' already exists`)
                error.code = 'sync-create-conflict'
                throw error

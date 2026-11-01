@@ -81,6 +81,7 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
 
    async function findMany(where = {}) {
       whereToElectricParams(where)
+      where = structuredClone(where)
       const { rows } = await retryLeader(() => db.query(relations.length ? `WITH RECURSIVE hidden(model_name, row_id) AS (
          SELECT model_name, row_id FROM electric_local_deletions
          UNION

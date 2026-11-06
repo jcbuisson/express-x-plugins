@@ -108,9 +108,9 @@ export function createOfflineElectricModel({ db, service, modelName, url, primar
    }
 
    const sharedObservables = shareQueryObservables(createObservable)
-   function getObservable(where = {}) {
+   function getObservable(where = {}, options = {}) {
       whereToElectricParams(where)
-      return sharedObservables(where)
+      return sharedObservables(where, options)
    }
 
    function createObservable(where) {

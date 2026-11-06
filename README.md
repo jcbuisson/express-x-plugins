@@ -529,3 +529,9 @@ is queued; the server still discovers PostgreSQL CASCADE constraints and writes
 the authoritative tombstones. Relationship configuration is explicit on the client;
 it is not downloaded from the server. Direct models without a local database are
 unaffected.
+
+UI subscriptions can opt into an immediate placeholder with
+`model.getObservable(where, { initialValue: [] })`. The returned observable
+replays its latest value and releases its subscription when the last subscriber
+unsubscribes. Omit the option to wait for actual rows; `findMany()` and
+`findUnique()` always wait for actual data.

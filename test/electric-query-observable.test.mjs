@@ -74,3 +74,31 @@ test('offline models share database reads and refresh after the last unsubscribe
    assert.deepEqual(a.at(-1), [])
    three.unsubscribe()
 })
+
+test('initial values are optional, replay actual rows, and reset after unsubscribe', () => {
+   const source = new Subject()
+   let starts = 0, stops = 0
+   const observe = shareQueryObservables(() => new Observable(subscriber => {
+      starts++
+      const subscription = source.subscribe(subscriber)
+      return () => { stops++; subscription.unsubscribe() }
+   }))
+   const seeded = observe({}, { initialValue: [] })
+   const a = [], b = [], unseeded = []
+   const one = seeded.subscribe(value => a.push(value))
+   assert.deepEqual(a, [[]])
+   const raw = observe().subscribe(value => unseeded.push(value))
+   assert.deepEqual(unseeded, [])
+   source.next([1])
+   const two = seeded.subscribe(value => b.push(value))
+   assert.deepEqual(b, [[1]])
+   assert.equal(starts, 1)
+   one.unsubscribe()
+   two.unsubscribe()
+   raw.unsubscribe()
+   assert.equal(stops, 1)
+   const three = seeded.subscribe(value => a.push(value))
+   assert.deepEqual(a, [[], [1], []])
+   assert.equal(starts, 2)
+   three.unsubscribe()
+})

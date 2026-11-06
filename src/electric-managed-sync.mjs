@@ -1,3 +1,4 @@
+import { withInitialValue } from './electric-query-observable.mjs'
 import { Observable } from 'rxjs'
 
 /** One database and one cached model per plugin instance. Browser locks span tabs. */
@@ -169,9 +170,9 @@ export function createManagedSync(options, createModel) {
             })
             return disposal
          },
-         getObservable(where = {}) {
+         getObservable(where = {}, options = {}) {
             const query = structuredClone(where)
-            return new Observable(subscriber => {
+            return withInitialValue(new Observable(subscriber => {
                if (disposed) { subscriber.error(new Error('Electric model has been disposed')); return }
                let subscription
                let cancelled = false
@@ -181,7 +182,7 @@ export function createManagedSync(options, createModel) {
                   if (!cancelled && !disposed) subscription = model.getObservable(query).subscribe(subscriber)
                }).catch(fail)
                return () => { cancelled = true; subscribers.delete(subscriber); subscription?.unsubscribe() }
-            })
+            }), options)
          },
          findMany: (where = {}) => invoke('findMany', where),
          findUnique: (where = {}) => invoke('findUnique', where),

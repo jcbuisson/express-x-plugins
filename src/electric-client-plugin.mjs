@@ -63,9 +63,9 @@ export function electricClientPlugin(app, options = {}) {
 
       const sharedObservable = shareQueryObservables(createObservable)
 
-      function getObservable(where = {}) {
+      function getObservable(where = {}, options = {}) {
          whereToElectricParams(where) // Preserve eager filter validation.
-         return sharedObservable(where)
+         return sharedObservable(where, options)
       }
 
       function createObservable(where) {

@@ -1,19 +1,98 @@
 
 # express-x-plugins
 
-Currently includes:
+Plugins for [Express-X](https://github.com/jcbuisson/express-x), with separate
+server and browser entry points.
 
-- a plugin which preserves room membership and socket data across page reloads
+| Plugin | Purpose | Server / client imports |
+| --- | --- | --- |
+| [Electric](#electric-plugin-local-first-postgres) | PostgreSQL Shapes, with optional persistent offline writes | `/electric-server`, `/electric-client` |
+| [Reload](#reload-plugin) | Restore socket rooms and data after a page reload | `/reload-server`, `/reload-client` |
+| [Metadata sync](#custom-metadata-sync-plugin) | Timestamp reconciliation using Drizzle and Dexie | `/sync-server`, `/sync-client` |
+| [PGCouch](#pgcouch-plugin) | Atomic offline transactions replicated through CouchDB/PouchDB | `/pgcouch-server`, `/pgcouch-client` |
 
-- a plugin integrating ElectricSQL sync engine into express-x, which greatly simplifies relational database
-access and provides powerful local-first features
+All import paths below are prefixed with `@jcbuisson/express-x-plugins`.
+`/electric-worker` and `/sync-algorithm` are supporting modules, not plugins.
 
+## Setup
 
-## Install
+Requires Node.js 18+ and npm 8+. Install the package in each application that
+uses it, along with Express-X and the dependencies for your chosen plugin.
+Optional peer dependencies are listed in each plugin's setup instructions.
 
 ```sh
-npm install @jcbuisson/express-x-plugins
+# Server application
+npm install @jcbuisson/express-x @jcbuisson/express-x-plugins express socket.io
+
+# Browser application
+npm install @jcbuisson/express-x @jcbuisson/express-x-plugins socket.io-client
 ```
+
+Create the server application, configure its plugins, then start listening:
+
+```js
+import { expressX } from '@jcbuisson/express-x/server'
+
+const app = expressX()
+// Register server plugins here, completing any async schema preparation first.
+app.httpServer.listen(8000)
+```
+
+Create the browser client and register its plugins before connecting:
+
+```js
+import { io } from 'socket.io-client'
+import { createClient } from '@jcbuisson/express-x/client'
+
+const socket = io('http://localhost:8000', { autoConnect: false })
+const app = createClient(socket)
+// Register client plugins here.
+socket.connect()
+```
+
+The examples below use these server/client `app` instances. Configure your
+application's authentication and service publishing policies as needed. Choose
+one synchronization plugin for a given model: their service names and client
+model factories can overlap. Reload can be used alongside any of them.
+
+
+
+## Reload plugin
+
+Preserves Socket.IO room membership and `socket.data` across browser reloads.
+It uses the previous socket ID and a one-use transfer token stored in the tab's
+`sessionStorage`. No additional plugin dependencies are required.
+
+### Server setup
+
+Register before accepting connections:
+
+```js
+import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
+
+await app.configure(reloadPlugin)
+```
+
+Disconnected state remains available for two minutes by default. To change this,
+set `reloadTransferTtlMs` on the server's `app.get('config')` object before
+registering the plugin. The caches are in memory and scoped to the application;
+restoration requires reconnecting to the same running server instance.
+
+### Client setup
+
+Register before calling `socket.connect()` in the shared setup example:
+
+```js
+import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-client'
+
+await app.configure(reloadPlugin)
+```
+
+Restoration happens automatically on connection. The old socket's own ID room is
+excluded, and data already set on the new socket takes precedence over restored
+values.
+
+
 
 
 ## Electric plugin: local-first Postgres
@@ -21,7 +100,7 @@ npm install @jcbuisson/express-x-plugins
 Without managed sync (sync: false) or a supplied localDb, the client streams Shapes directly and sends CRUD calls directly;
 it has no persistent local mutation queue or owner election.
 
-Wth managed sync (sync: true) Express-X handles authorized PostgreSQL mutations; Electric streams committed rows to clients.
+With managed sync (sync: true) Express-X handles authorized PostgreSQL mutations; Electric streams committed rows to clients.
 
 The electric plugin has two separate elections:
 
@@ -32,31 +111,38 @@ Each PGlite instance has its own in-memory state: caches, transaction state, and
 They prevent duplicate database engines and duplicate synchronization across tabs. The database leader and sync owner can be different tabs.
 
 
-Electric’s does incremental replication: after the initial snapshot, it streams database changes instead of repeatedly comparing client/server metadata.
+Electric does incremental replication: after the initial snapshot, it streams database changes instead of repeatedly comparing client/server metadata.
 Its Shapes can represent filtered subsets of tables
 
 
 
-### Settings
-```bash
-# set lc_messages=C for the PostgreSQL role so Electric receives recognizable English errors
-ALTER ROLE chris SET lc_messages = 'C';
+### PostgreSQL setup
 
-# ALLOW POSTGRES LOGICAL REPLICATION
+Create your application tables through your normal migrations. For example, the
+managed sync example below uses a UUID primary key:
+
+```sql
+CREATE TABLE todos (
+  uid uuid PRIMARY KEY,
+  title text NOT NULL,
+  completed boolean NOT NULL DEFAULT false
+);
+```
+
+Run the following as a PostgreSQL administrator, replacing `app_user` with the
+role used by Electric. Restart PostgreSQL after changing replication settings.
+
+```sql
+ALTER ROLE app_user SET lc_messages = 'C';
 ALTER SYSTEM SET wal_level = 'logical';
 ALTER SYSTEM SET max_replication_slots = 10;
 ALTER SYSTEM SET max_wal_senders = 10;
-ALTER ROLE chris WITH REPLICATION;
-
-(restart postgres)
+ALTER ROLE app_user WITH REPLICATION;
 ```
 
-(?
-## Use HTTP2
-nginx: `listen 443 ssl http2;`
-)
-
-
+Start the Electric service using the [Docker example](#run-electric-from-docker).
+Set `DATABASE_URL` for the application and `ELECTRIC_URL` to the service's Shape
+endpoint (for that Docker example, `http://localhost:3001/v1/shape`).
 
 ### Server
 
@@ -189,7 +275,7 @@ return created, updated, or deleted rows directly.
 Install the optional client dependencies in the browser application:
 
 ```sh
-npm install @electric-sql/client rxjs
+npm install @electric-sql/client @electric-sql/pglite rxjs vue
 ```
 
 For a server configured without `sync: true`, the direct client API is:
@@ -326,6 +412,60 @@ initialize after an offline reload. The WASM asset is about 10 MB; increase the
 precache file-size limit accordingly. Apps that already provide a shared database
 can pass plugin-level `localDb` to retain automatic ownership management.
 
+Managed sync automatically pauses network ownership when `navigator.onLine` is
+false and resumes active models on the browser's `online` event. Local reads,
+writes, queued edits, and cross-tab notifications remain available while offline.
+A model explicitly stopped with `model.stop()` stays stopped after reconnection.
+Disposing a model removes its network listeners. Browser connectivity is a hint;
+requests can still fail while reported online and retain the usual retry behavior.
+For custom runtimes/tests, plugin options `network` and `networkEvents` can supply
+the connectivity state and an EventTarget respectively.
+
+
+Models default to `primaryKey: 'uid'` on both client and server. Set
+`primaryKey: 'id'` explicitly for tables that use `id`.
+
+With `sync: true`, the sync owner's Electric stream stays active when its tab is
+hidden because it serves other tabs too. To customize this behavior, pass
+`streamOptions.runtimeVisibility` to `createElectricModel`. Other stream options
+are preserved. Independent streams retain Electric's normal visibility behavior.
+
+
+### Local cascade visibility
+
+Configure the client with the same CASCADE relationships as the server schema:
+
+```js
+electricClientPlugin(app, {
+   sync: true,
+   databaseName: 'my-app',
+   relations: [
+      { child: 'user_group_relation', parent: 'group', column: 'group_uid' },
+      { child: 'user_group_relation', parent: 'user', column: 'user_uid' },
+   ],
+})
+```
+
+Names identify client models, and `column` is the child's foreign key referencing
+its parent's configured primary key. This applies to offline models sharing a
+local database, including managed sync. `findMany`, `findUnique` and observables
+hide descendants of locally deleted parents immediately, including transitive
+cascades. Managed tabs broadcast changes across models. Missing parents alone do
+not hide rows: Shapes can arrive in any order. Nullable foreign keys remain visible.
+The plugin retains local deletion markers across reloads and acknowledgement so
+children stay hidden until their server tombstones arrive. Only the parent delete
+is queued; the server still discovers PostgreSQL CASCADE constraints and writes
+the authoritative tombstones. Relationship configuration is explicit on the client;
+it is not downloaded from the server. Direct models without a local database are
+unaffected.
+
+UI subscriptions can opt into an immediate placeholder with
+`model.getObservable(where, { initialValue: [] })`. The returned observable
+replays its latest value and releases its subscription when the last subscriber
+unsubscribes. Omit the option to wait for actual rows; `findMany()` and
+`findUnique()` always wait for actual data.
+
+
 ### Explicit offline models
 
 For offline writes, install `@electric-sql/pglite`, pass a shared PGlite database as `localDb`, and use the sync server mode above.
@@ -365,7 +505,7 @@ configured table, and Electric source credentials stay server-side.
 
 ### Model configuration
 
-Server models may be strings (table, service name, and default `id` key) or objects:
+Server models may be strings (table, service name, and default `uid` key) or objects:
 
 ```js
 { name: 'todo', table: 'todos', primaryKey: 'id' }
@@ -412,40 +552,37 @@ docker compose up electric
 
 
 
-## Reload plugin
-
-### Server
-
-```js
-import { reloadPlugin } from '@jcbuisson/express-x-plugins/reload-server'
-```
-
-
-Managed sync automatically pauses network ownership when `navigator.onLine` is
-false and resumes active models on the browser's `online` event. Local reads,
-writes, queued edits, and cross-tab notifications remain available while offline.
-A model explicitly stopped with `model.stop()` stays stopped after reconnection.
-Disposing a model removes its network listeners. Browser connectivity is a hint;
-requests can still fail while reported online and retain the usual retry behavior.
-For custom runtimes/tests, plugin options `network` and `networkEvents` can supply
-the connectivity state and an EventTarget respectively.
-
-
-Models default to `primaryKey: 'uid'` on both client and server. Set
-`primaryKey: 'id'` explicitly for tables that use `id`.
-
-With `sync: true`, the sync owner's Electric stream stays active when its tab is
-hidden because it serves other tabs too. To customize this behavior, pass
-`streamOptions.runtimeVisibility` to `createElectricModel`. Other stream options
-are preserved. Independent streams retain Electric's normal visibility behavior.
 
 ## Custom metadata sync plugin
 
 The original timestamp/metadata synchronization engine is available separately
 from Electric:
 
+### Server setup
+
 ```sh
-npm install dexie uuid @vueuse/core rxjs vue drizzle-orm
+npm install drizzle-orm pg
+```
+
+Define your Drizzle schema and apply it to PostgreSQL through your application's
+migration process before registering the plugin:
+
+```js
+import { Pool } from 'pg'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { pgTable, text, timestamp } from 'drizzle-orm/pg-core'
+
+const todos = pgTable('todos', {
+  uid: text('uid').primaryKey(),
+  label: text('label').notNull(),
+})
+const metadata = pgTable('metadata', {
+  uid: text('uid').primaryKey(),
+  created_at: timestamp('created_at'),
+  updated_at: timestamp('updated_at'),
+  deleted_at: timestamp('deleted_at'),
+})
+const db = drizzle(new Pool({ connectionString: process.env.DATABASE_URL }))
 ```
 
 On the server, register Drizzle tables with a `uid` primary key and a shared
@@ -469,7 +606,14 @@ authorized subscribers. Authorization is required; `maxSyncRecords` defaults
 to 10,000. Use separate applications for Electric and custom sync services
 when their model names overlap.
 
-On the client:
+### Client setup
+
+```sh
+npm install dexie uuid @vueuse/core rxjs vue
+```
+
+Use IndexedDB in the browser; the model name must match the server table name.
+The fields array declares the model's indexed Dexie fields.
 
 ```js
 import { syncClientPlugin } from '@jcbuisson/express-x-plugins/sync-client'
@@ -502,47 +646,93 @@ Restored from the last committed custom implementations, dated July 8, 2026:
 was removed from Express-X in **47c2293** on July 19. Only module imports and
 plugin export aliases were adapted; the synchronization logic is preserved.
 
-### Local cascade visibility
 
-Configure the client with the same CASCADE relationships as the server schema:
 
-```js
-electricClientPlugin(app, {
-   sync: true,
-   databaseName: 'my-app',
-   relations: [
-      { child: 'user_group_relation', parent: 'group', column: 'group_uid' },
-      { child: 'user_group_relation', parent: 'user', column: 'user_uid' },
-   ],
-})
-```
 
-Names identify client models, and `column` is the child's foreign key referencing
-its parent's configured primary key. This applies to offline models sharing a
-local database, including managed sync. `findMany`, `findUnique` and observables
-hide descendants of locally deleted parents immediately, including transitive
-cascades. Managed tabs broadcast changes across models. Missing parents alone do
-not hide rows: Shapes can arrive in any order. Nullable foreign keys remain visible.
-The plugin retains local deletion markers across reloads and acknowledgement so
-children stay hidden until their server tombstones arrive. Only the parent delete
-is queued; the server still discovers PostgreSQL CASCADE constraints and writes
-the authoritative tombstones. Relationship configuration is explicit on the client;
-it is not downloaded from the server. Direct models without a local database are
-unaffected.
+## PGCouch plugin
 
-UI subscriptions can opt into an immediate placeholder with
-`model.getObservable(where, { initialValue: [] })`. The returned observable
-replays its latest value and releases its subscription when the last subscriber
-unsubscribes. Omit the option to wait for actual rows; `findMany()` and
-`findUnique()` always wait for actual data.
-
-## PGCouch
-
-[PGCouch](docs/pgcouch.md) provides the Electric model CRUD/query API with
+[PGCouch](docs/pgcouch.md) provides model CRUD/query API with
 PostgreSQL on the server, PGLite on clients, and CouchDB/PouchDB transaction
 replication. It supports atomic multi-table offline writes, durable outboxes,
-and server-side constraint validation without using Electric. Import
-`pgcouchClientPlugin` from `@jcbuisson/express-x-plugins/pgcouch-client` and
+and server-side constraint validation.
+Import `pgcouchClientPlugin` from `@jcbuisson/express-x-plugins/pgcouch-client` and
 `pgcouchServerPlugin` from `@jcbuisson/express-x-plugins/pgcouch-server`.
 See the guide for schema requirements, permissions, conflict policy and the
 initial snapshot-based replication limits.
+
+
+### Server setup
+
+```sh
+npm install pg pouchdb
+```
+
+Create the PostgreSQL business tables, provision a CouchDB database, and install
+`pgcouchValidationDocument()` with an admin connection before allowing clients
+to replicate. Configure CouchDB membership, authentication and browser CORS;
+only the server account should have the `pgcouch-server` role.
+
+```js
+import { Pool } from 'pg'
+import PouchDB from 'pouchdb'
+import { pgcouchServerPlugin } from '@jcbuisson/express-x-plugins/pgcouch-server'
+
+const models = [{ name: 'todos', primaryKey: 'uid' }]
+const db = new Pool({ connectionString: process.env.DATABASE_URL })
+const couch = new PouchDB(process.env.COUCH_DATABASE_URL)
+const sync = pgcouchServerPlugin(app, db, models, {
+  couch,
+  authorize: async (context, operation) => policy(context, operation),
+  onError: console.error,
+})
+await sync.ready // before app.httpServer.listen(...)
+```
+
+Supply your application's `policy`. Replicated proposals have no verified socket
+identity; the [PGCouch guide](docs/pgcouch.md) explains `contextForDocument` and
+trusted replication scopes. Initialization prepares internal protocol tables;
+your application owns business schema migrations.
+
+### Client setup
+
+```sh
+npm install @electric-sql/pglite pouchdb rxjs
+```
+
+```js
+import { PGlite } from '@electric-sql/pglite'
+import PouchDB from 'pouchdb' // use the browser build in browser applications
+import { pgcouchClientPlugin } from '@jcbuisson/express-x-plugins/pgcouch-client'
+
+const localDb = new PGlite('idb://my-app-relational')
+await localDb.exec(`
+  CREATE TABLE IF NOT EXISTS todos (
+    uid uuid PRIMARY KEY,
+    title text NOT NULL,
+    completed boolean NOT NULL DEFAULT false
+  );
+`)
+const couch = new PouchDB('my-app-transactions')
+pgcouchClientPlugin(app, {
+  models: [{ name: 'todos', primaryKey: 'uid' }],
+  localDb,
+  couch,
+  remote: '/couchdb/my-app', // authenticated CouchDB URL or application proxy
+  onError: console.error,
+})
+await app.pgcouchReady
+const todos = app.createPGCouchModel('todos')
+await todos.create({ title: 'Works offline', completed: false })
+const subscription = todos.getObservable({}).subscribe(console.log)
+
+// On teardown:
+// subscription.unsubscribe()
+// await app.disposePGCouchSync()
+// await localDb.close()
+// await couch.close()
+```
+
+Use matching server/client schemas and globally unique IDs for offline writes.
+The application owns both local databases and coordinates multi-tab access.
+PGCouch replicates complete configured datasets in decision snapshots; use bounded
+scopes and read the guide's schema and permission requirements before deployment.

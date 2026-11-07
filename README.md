@@ -535,3 +535,14 @@ UI subscriptions can opt into an immediate placeholder with
 replays its latest value and releases its subscription when the last subscriber
 unsubscribes. Omit the option to wait for actual rows; `findMany()` and
 `findUnique()` always wait for actual data.
+
+## PGCouch
+
+[PGCouch](docs/pgcouch.md) provides the Electric model CRUD/query API with
+PostgreSQL on the server, PGLite on clients, and CouchDB/PouchDB transaction
+replication. It supports atomic multi-table offline writes, durable outboxes,
+and server-side constraint validation without using Electric. Import
+`pgcouchClientPlugin` from `@jcbuisson/express-x-plugins/pgcouch-client` and
+`pgcouchServerPlugin` from `@jcbuisson/express-x-plugins/pgcouch-server`.
+See the guide for schema requirements, permissions, conflict policy and the
+initial snapshot-based replication limits.

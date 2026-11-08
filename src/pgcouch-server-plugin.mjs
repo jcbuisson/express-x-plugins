@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { applyOperations, canonical, documentOf, json, modelsOf, putImmutable, readRows, snapshot, transaction } from './pgcouch-common.mjs'
+import { applyOperations, canonical, documentOf, json, modelsOf, putImmutable, quote, readRows, snapshot, transaction } from './pgcouch-common.mjs'
 
 export async function preparePGCouchSchema(db) {
    await db.query(`CREATE TABLE IF NOT EXISTS pgcouch_state (id INTEGER PRIMARY KEY CHECK (id = 1), sequence BIGINT NOT NULL)`)
@@ -13,6 +13,8 @@ export async function preparePGCouchSchema(db) {
 export function pgcouchServerPlugin(app, db, models, options = {}) {
    const configured = modelsOf(models)
    const couch = options.couch
+   const checkpointInterval = options.checkpointInterval ?? 100
+   if (!Number.isSafeInteger(checkpointInterval) || checkpointInterval < 1) throw new TypeError('checkpointInterval must be a positive integer')
    if (configured.some(model => model.name === (options.serviceName ?? 'pgcouch'))) throw new TypeError('Transaction service name conflicts with a model name')
    if (!couch?.allDocs || !couch?.put) throw new TypeError('options.couch must be a PouchDB-compatible CouchDB connection')
    if (!db?.connect && !db?.transaction) throw new TypeError('db must be a pg Pool or transaction-capable database')
@@ -33,8 +35,9 @@ export function pgcouchServerPlugin(app, db, models, options = {}) {
    }
 
    async function publish() {
-      const { rows } = await db.query('SELECT id, proposal, decision FROM pgcouch_receipts WHERE NOT published ORDER BY (decision->>\'sequence\')::bigint')
-      for (const row of rows) {
+      while (true) {
+         const row = (await db.query('SELECT id, proposal, decision FROM pgcouch_receipts WHERE NOT published ORDER BY (decision->>\'sequence\')::bigint LIMIT 1')).rows[0]
+         if (!row) break
          if (row.proposal) await putImmutable(couch, row.proposal)
          await putImmutable(couch, row.decision)
          await db.query('UPDATE pgcouch_receipts SET published = true WHERE id = $1', [row.id])
@@ -54,6 +57,9 @@ export function pgcouchServerPlugin(app, db, models, options = {}) {
          }
          if (doc.previous && !(await tx.query('SELECT id FROM pgcouch_receipts WHERE id = $1', [doc.previous])).rows.length) return null
          const sequence = String(BigInt(state[0].sequence) + 1n)
+         await tx.query(`CREATE TEMP TABLE pgcouch_changes (
+            table_name TEXT, key JSONB, PRIMARY KEY (table_name, key)
+         ) ON COMMIT DROP`)
          let status = 'accepted', results, rejection
          await tx.query('SAVEPOINT pgcouch_mutation')
          try {
@@ -71,9 +77,19 @@ export function pgcouchServerPlugin(app, db, models, options = {}) {
             rejection = { code: error.code ?? 'invalid-argument', message: error.code === 'forbidden' ? 'Transaction forbidden' : 'Transaction could not satisfy the database constraints' }
          }
          await tx.query('RELEASE SAVEPOINT pgcouch_mutation')
+         const changes = []
+         for (const model of configured) {
+            // Read final rows after every AFTER trigger has completed. Captured NEW
+            // images alone can be stale when another trigger updates the same row.
+            const rows = (await tx.query(`SELECT c.key AS id, to_jsonb(r) AS data
+               FROM pgcouch_changes c LEFT JOIN ${quote(model.table)} r
+               ON r.${quote(model.primaryKey)} = (jsonb_populate_record(NULL::${quote(model.table)}, jsonb_build_object('${model.primaryKey}', c.key))).${quote(model.primaryKey)}
+               WHERE c.table_name = $1 ORDER BY c.key`, [model.table])).rows
+            changes.push(...rows.map(row => ({ table: model.table, ...row })))
+         }
          const decision = JSON.parse(json({ _id: `result:${doc._id.slice(12)}`, type: 'result', transactionId: doc._id,
             status, sequence, ...(results ? { results } : {}), ...(rejection ? { error: rejection } : {}),
-            snapshot: await snapshot(tx, configured) }))
+            changes, ...(BigInt(sequence) % BigInt(checkpointInterval) === 0n ? { snapshot: await snapshot(tx, configured) } : {}) }))
          await tx.query('UPDATE pgcouch_state SET sequence = $1 WHERE id = 1', [sequence])
          await tx.query('INSERT INTO pgcouch_receipts (id, proposal, decision) VALUES ($1, $2::jsonb, $3::jsonb)', [doc._id, json(doc), json(decision)])
          return decision
@@ -104,6 +120,25 @@ export function pgcouchServerPlugin(app, db, models, options = {}) {
       await preparePGCouchSchema(db)
       await transaction(db, async tx => {
          await tx.query('SELECT sequence FROM pgcouch_state WHERE id = 1 FOR UPDATE')
+         // Capture final row images, including SQL trigger and foreign-key cascade effects.
+         // Writes outside this plugin are not replicated.
+         await tx.query(`CREATE OR REPLACE FUNCTION pgcouch_capture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+            IF to_regclass('pg_temp.pgcouch_changes') IS NOT NULL THEN
+               IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND to_jsonb(OLD)->TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW)->TG_ARGV[0]) THEN
+                  INSERT INTO pg_temp.pgcouch_changes VALUES (TG_TABLE_NAME, to_jsonb(OLD)->TG_ARGV[0]) ON CONFLICT DO NOTHING;
+               END IF;
+               IF TG_OP <> 'DELETE' THEN
+                  INSERT INTO pg_temp.pgcouch_changes VALUES (TG_TABLE_NAME, to_jsonb(NEW)->TG_ARGV[0]) ON CONFLICT DO NOTHING;
+               END IF;
+            END IF;
+            RETURN NULL;
+         END $$`)
+         for (const model of configured) {
+            await tx.query(`DROP TRIGGER IF EXISTS pgcouch_capture ON ${quote(model.table)}`)
+            await tx.query(`CREATE TRIGGER pgcouch_capture AFTER INSERT OR UPDATE OR DELETE ON ${quote(model.table)}
+               FOR EACH ROW EXECUTE FUNCTION pgcouch_capture('${model.primaryKey}')`)
+         }
          if (!(await tx.query("SELECT id FROM pgcouch_receipts WHERE id = 'bootstrap'")).rows.length) {
             const doc = { _id: 'result:bootstrap', type: 'result', status: 'accepted', sequence: '0', snapshot: await snapshot(tx, configured) }
             await tx.query('INSERT INTO pgcouch_receipts (id, decision) VALUES ($1, $2::jsonb)', ['bootstrap', json(doc)])

@@ -658,7 +658,7 @@ and server-side constraint validation.
 Import `pgcouchClientPlugin` from `@jcbuisson/express-x-plugins/pgcouch-client` and
 `pgcouchServerPlugin` from `@jcbuisson/express-x-plugins/pgcouch-server`.
 See the guide for schema requirements, permissions, conflict policy and the
-initial snapshot-based replication limits.
+checkpoint and incremental replication behavior.
 
 
 ### Server setup
@@ -734,5 +734,5 @@ const subscription = todos.getObservable({}).subscribe(console.log)
 
 Use matching server/client schemas and globally unique IDs for offline writes.
 The application owns both local databases and coordinates multi-tab access.
-PGCouch replicates complete configured datasets in decision snapshots; use bounded
+PGCouch replicates row changes with periodic full checkpoints; use bounded
 scopes and read the guide's schema and permission requirements before deployment.

@@ -173,8 +173,18 @@ preceding local transaction. This preserves causal order for that client's
 queue even when CouchDB delivers proposals in another order. Each document
 contains 1–1000 operations. Proposals are immutable. The server writes a separate
 immutable `result:abc123` document with `transactionId`, `status` (`accepted` or
-`rejected`), a PostgreSQL-assigned `sequence`, an authoritative `snapshot`, and
-`results` or `error`. Server service calls use the same receipt/outbox protocol.
+`rejected`), a PostgreSQL-assigned `sequence`, authoritative row `changes`, and `results` or
+`error`. Each change is `{ table, id, data }`: `data` is the complete server row,
+or `null` for a deletion. Server SQL triggers capture defaults, cascades and
+changes caused by other database triggers inside the transaction. Multiple
+changes to one row are collapsed to its final image; rejected transactions
+publish an empty change list. Server service calls use the same receipt/outbox protocol.
+
+`result:bootstrap` contains the initial full snapshot. Subsequent decisions include
+a full `snapshot` checkpoint only every `checkpointInterval` decisions (server
+option, default `100`, a positive integer). A checkpoint and that decision's
+changes describe the same committed state; clients use the checkpoint directly.
+The SQL receipt persists changes and any checkpoint atomically with the writes.
 
 1. PGLite atomically commits local operations and their proposal in
    `pgcouch_outbox`. PouchDB publication is retried from this durable outbox.
@@ -186,12 +196,31 @@ immutable `result:abc123` document with `transactionId`, `status` (`accepted` or
    share this idempotency boundary.
 4. The server publishes proposals and decisions from the SQL outbox. A crash
    or replication outage between databases does not lose an acknowledged commit.
-5. Clients atomically replace their authoritative state from the newest decision
-   and replay their own undecided local transactions in order. Failed rebases are
+5. Clients ingest the PouchDB changes feed in pages of at most 100 documents,
+   persisting the feed cursor and received decisions atomically in PGLite. They
+   maintain authoritative rows in a separate local SQL table, apply consecutive
+   decisions in server sequence order, and wait for missing predecessors. A
+   received newer checkpoint can bridge a gap. Processed inbox decisions are
+   removed. Older acknowledgements still resolve pending local proposals.
+6. Clients atomically rebuild application tables from their authoritative SQL
+   rows and replay undecided local transactions in order. Failed rebases are
    retained as pending/blocked until the server decides them. Rejected optimistic
-   work is removed during reconciliation. Newly installed clients bootstrap from
-   `result:bootstrap` or the latest snapshot, without replaying history in arrival
-   order.
+   work is removed during reconciliation. New clients bootstrap from an available
+   checkpoint and subsequent changes. Older snapshot-only decisions remain readable.
+
+Reconciliation no longer loads all historical snapshots into JavaScript memory.
+A feed page and an individual checkpoint still require memory; full checkpoints
+remain proportional to dataset size. Authoritative rows occupy an additional
+local SQL copy. Rebuilding application tables still touches the full dataset
+when authoritative state changes. This reduces replication payload and history
+memory use; it does not make reconciliation proportional only to changed rows.
+History is streamed on first bootstrap; checkpoint discovery does not bypass
+PouchDB's initial replication of historical documents.
+
+Upgrade clients before enabling incremental decisions on the server: older
+clients require a snapshot on every decision. Upgraded clients rebuild their
+SQL baseline from the existing replicated history on first startup. Existing
+CouchDB documents and SQL receipts are retained; they are not rewritten.
 
 CouchDB owns document revisions, durable replication, retry/checkpoint behavior,
 and conflict detection. Unique immutable proposals avoid competing revisions
@@ -211,12 +240,15 @@ semantic merge of mutually incompatible relational transactions.
   must be `DEFERRABLE` to support cyclic transactions and atomic snapshot
   replacement. Transactions explicitly defer constraints and validate them
   before success. Keep all affected tables in the same configured scope.
-- The initial implementation includes **all configured rows in every decision**.
-  This captures defaults, cascades and server trigger effects reliably, but has
-  substantial storage/bandwidth cost. It is intended for bounded datasets, not
-  large tables or unrestricted transaction histories. No pruning/compaction
-  policy is implemented. Do not delete protocol documents or SQL receipts:
-  ordering, recovery and idempotency depend on them.
+- Ordinary decisions contain only changed rows; checkpoints periodically include
+  all configured rows. Increasing `checkpointInterval` reduces checkpoint storage
+  at the cost of more deltas between checkpoints. History still grows over time;
+  no pruning/compaction policy is implemented. Do not delete protocol documents
+  or SQL receipts: ordering, recovery and idempotency depend on them.
+- Initialization installs the `pgcouch_capture` function and an AFTER row trigger
+  on each configured server table. The database account needs permission to
+  create functions and triggers. Do not disable or replace these capture triggers.
+  `TRUNCATE` and writes outside plugin transactions are not replicated.
 - Local snapshot replacement writes explicit columns. Generated columns and
   non-idempotent local triggers are not supported; avoid them in the client
   schema. Use UUIDs for offline IDs, or an application-specific globally unique

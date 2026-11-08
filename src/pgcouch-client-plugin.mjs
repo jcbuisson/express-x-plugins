@@ -29,23 +29,49 @@ export function pgcouchClientPlugin(app, options = {}) {
       for (const { document } of rows) await putImmutable(couch, document)
    }
 
-   async function reconcile() {
-      try { await publish() } catch (error) { report(error) }
-      const { rows } = await couch.allDocs({ include_docs: true, conflicts: true, startkey: 'result:', endkey: 'result:\uffff' })
-      const decisions = rows.map(row => row.doc).filter(Boolean)
-      for (const doc of decisions) {
-         if (doc._conflicts?.length) throw new Error(`Conflicting server decisions: ${doc._id}`)
-         if (doc.type !== 'result' || !['accepted', 'rejected'].includes(doc.status) || !/^\d+$/.test(doc.sequence) || !doc.snapshot) throw new Error('Invalid server decision')
-      }
-      if (!decisions.length) return
-      decisions.sort((a, b) => BigInt(a.sequence) < BigInt(b.sequence) ? -1 : BigInt(a.sequence) > BigInt(b.sequence) ? 1 : 0)
-      const latest = decisions.at(-1)
+   // Keep authoritative rows on disk, separate from optimistic application tables.
+   async function acceptDecisions(tx) {
+      const state = (await tx.query('SELECT * FROM pgcouch_local_state WHERE id = 1')).rows[0]
+      let sequence = state.initialized ? BigInt(state.sequence) : -1n
       let updated = false
       const rejections = []
-      await transaction(db, async tx => {
-         const state = (await tx.query('SELECT sequence FROM pgcouch_local_state WHERE id = 1')).rows[0]
-         for (const decision of decisions) {
-            if (!decision.transactionId) continue
+      // A checkpoint can bridge missing earlier history during initial replication.
+      const checkpoint = (await tx.query(`SELECT document FROM pgcouch_inbox
+         WHERE sequence > $1 AND document ? 'snapshot' ORDER BY sequence DESC LIMIT 1`, [String(sequence)])).rows[0]?.document
+      if (checkpoint) {
+         await tx.query('DELETE FROM pgcouch_base')
+         for (const model of models) {
+            const rows = checkpoint.snapshot[model.table]
+            if (!Array.isArray(rows)) throw new Error(`Snapshot is missing table '${model.table}'`)
+            for (const row of rows) await tx.query('INSERT INTO pgcouch_base VALUES ($1, $2::jsonb, $3::jsonb)', [model.table, json(row[model.primaryKey]), json(row)])
+         }
+         sequence = BigInt(checkpoint.sequence)
+         updated = true
+      }
+      // Process one document at a time; never materialize transaction history in JS.
+      while (true) {
+         const decision = (await tx.query('SELECT document FROM pgcouch_inbox WHERE sequence = $1', [String(sequence + 1n)])).rows[0]?.document
+         if (!decision) break
+         if (!Array.isArray(decision.changes)) throw new Error('Incremental decision is missing changes')
+         for (const change of decision.changes) {
+            const model = models.find(model => model.table === change.table)
+            if (!model || !['string', 'number'].includes(typeof change.id)) throw new Error('Invalid row change')
+            if (change.data === null) await tx.query('DELETE FROM pgcouch_base WHERE table_name = $1 AND key = $2::jsonb', [change.table, json(change.id)])
+            else {
+               if (!change.data || change.data[model.primaryKey] !== change.id) throw new Error('Invalid changed row')
+               await tx.query(`INSERT INTO pgcouch_base VALUES ($1, $2::jsonb, $3::jsonb)
+                  ON CONFLICT (table_name, key) DO UPDATE SET row_data = EXCLUDED.row_data`, [change.table, json(change.id), json(change.data)])
+            }
+         }
+         sequence++
+         updated = true
+      }
+      // Acknowledge even older proposals skipped by a checkpoint. Their decisions
+      // may arrive later than the checkpoint and must still resolve local outbox entries.
+      while (true) {
+         const decision = (await tx.query('SELECT document FROM pgcouch_inbox WHERE sequence <= $1 ORDER BY sequence LIMIT 1', [String(sequence)])).rows[0]?.document
+         if (!decision) break
+         if (decision.transactionId) {
             const result = await tx.query(`UPDATE pgcouch_outbox SET status = $2, error = $3::jsonb
                WHERE id = $1 AND status = 'pending' RETURNING id`, [decision.transactionId, decision.status, json(decision.error ?? null)])
             if (result.rows.length) {
@@ -53,36 +79,56 @@ export function pgcouchClientPlugin(app, options = {}) {
                if (decision.status === 'rejected') rejections.push(Object.assign(new Error(decision.error?.message ?? 'Transaction rejected'), decision.error, { transactionId: decision.transactionId }))
             }
          }
-         if (!updated && BigInt(state.sequence) >= BigInt(latest.sequence)) return
-         if (BigInt(state.sequence) > BigInt(latest.sequence)) throw new Error('Replication is missing the current authoritative snapshot')
-         await tx.query('SET CONSTRAINTS ALL DEFERRED')
-         for (const model of [...models].reverse()) await tx.query(`DELETE FROM ${quote(model.table)}`)
-         for (const model of models) {
-            const data = latest.snapshot[model.table]
-            if (!Array.isArray(data)) throw new Error(`Snapshot is missing table '${model.table}'`)
-            for (const row of data) {
-               const entries = Object.entries(row)
-               await tx.query(`INSERT INTO ${quote(model.table)} (${entries.map(([key]) => quote(key)).join(', ')}) OVERRIDING SYSTEM VALUE VALUES (${entries.map((_, i) => `$${i + 1}`).join(', ')})`, entries.map(([, value]) => value))
-            }
+         await tx.query('DELETE FROM pgcouch_inbox WHERE sequence = $1', [decision.sequence])
+      }
+      if (!updated) return { updated, rejections }
+      await tx.query('SET CONSTRAINTS ALL DEFERRED')
+      for (const model of [...models].reverse()) await tx.query(`DELETE FROM ${quote(model.table)}`)
+      for (const model of models) {
+         // Populate from disk in SQL rather than loading an entire dataset in JS.
+         await tx.query(`INSERT INTO ${quote(model.table)} OVERRIDING SYSTEM VALUE
+            SELECT (jsonb_populate_record(NULL::${quote(model.table)}, row_data)).*
+            FROM pgcouch_base WHERE table_name = $1`, [model.table])
+      }
+      await tx.query('SET CONSTRAINTS ALL IMMEDIATE')
+      const pending = (await tx.query("SELECT id, document FROM pgcouch_outbox WHERE status = 'pending' ORDER BY ordinal")).rows
+      for (const item of pending) {
+         await tx.query('SAVEPOINT pgcouch_replay')
+         try {
+            await applyOperations(tx, item.document.operations, models)
+            await tx.query('UPDATE pgcouch_outbox SET error = NULL WHERE id = $1', [item.id])
+         } catch (error) {
+            await tx.query('ROLLBACK TO SAVEPOINT pgcouch_replay')
+            await tx.query('UPDATE pgcouch_outbox SET error = $2::jsonb WHERE id = $1', [item.id, json({ message: error.message, code: error.code ?? 'rebase-failed' })])
          }
-         await tx.query('SET CONSTRAINTS ALL IMMEDIATE')
-         const pending = (await tx.query("SELECT id, document FROM pgcouch_outbox WHERE status = 'pending' ORDER BY ordinal")).rows
-         for (const item of pending) {
-            await tx.query('SAVEPOINT pgcouch_replay')
-            try {
-               await applyOperations(tx, item.document.operations, models)
-               await tx.query('UPDATE pgcouch_outbox SET error = NULL WHERE id = $1', [item.id])
-            } catch (error) {
-               await tx.query('ROLLBACK TO SAVEPOINT pgcouch_replay')
-               await tx.query('UPDATE pgcouch_outbox SET error = $2::jsonb WHERE id = $1', [item.id, json({ message: error.message, code: error.code ?? 'rebase-failed' })])
+         await tx.query('RELEASE SAVEPOINT pgcouch_replay')
+      }
+      await tx.query('UPDATE pgcouch_local_state SET sequence = $1, initialized = true WHERE id = 1', [String(sequence)])
+      return { updated, rejections }
+   }
+
+   async function reconcile() {
+      try { await publish() } catch (error) { report(error) }
+      while (true) {
+         const state = (await db.query('SELECT cursor FROM pgcouch_local_state WHERE id = 1')).rows[0]
+         const page = await couch.changes({ since: state.cursor ?? 0, include_docs: true, conflicts: true, limit: 100 })
+         const { updated, rejections } = await transaction(db, async tx => {
+            for (const change of page.results) {
+               if (!change.id.startsWith('result:')) continue
+               const doc = change.doc
+               if (doc?._conflicts?.length) throw new Error(`Conflicting server decisions: ${doc._id}`)
+               if (!doc || doc.type !== 'result' || !['accepted', 'rejected'].includes(doc.status) || !/^\d+$/.test(doc.sequence) || (!doc.snapshot && !Array.isArray(doc.changes))) throw new Error('Invalid server decision')
+               await tx.query(`INSERT INTO pgcouch_inbox VALUES ($1, $2::jsonb)
+                  ON CONFLICT (sequence) DO UPDATE SET document = EXCLUDED.document`, [doc.sequence, json(doc)])
             }
-            await tx.query('RELEASE SAVEPOINT pgcouch_replay')
-         }
-         await tx.query('UPDATE pgcouch_local_state SET sequence = $1 WHERE id = 1', [latest.sequence])
-         updated = true
-      })
-      if (updated) changed.next()
-      rejections.forEach(report)
+            const result = await acceptDecisions(tx)
+            await tx.query('UPDATE pgcouch_local_state SET cursor = $1::jsonb WHERE id = 1', [json(page.last_seq)])
+            return result
+         })
+         if (updated) changed.next()
+         rejections.forEach(report)
+         if (page.results.length < 100) break
+      }
    }
 
    function start() {
@@ -110,6 +156,10 @@ export function pgcouchClientPlugin(app, options = {}) {
          status TEXT NOT NULL DEFAULT 'pending', error JSONB
       ); CREATE TABLE IF NOT EXISTS pgcouch_local_state (id INTEGER PRIMARY KEY, sequence BIGINT NOT NULL);
       INSERT INTO pgcouch_local_state VALUES (1, -1) ON CONFLICT DO NOTHING;`)
+      await db.exec(`ALTER TABLE pgcouch_local_state ADD COLUMN IF NOT EXISTS cursor JSONB;
+         ALTER TABLE pgcouch_local_state ADD COLUMN IF NOT EXISTS initialized BOOLEAN NOT NULL DEFAULT false;
+         CREATE TABLE IF NOT EXISTS pgcouch_base (table_name TEXT NOT NULL, key JSONB NOT NULL, row_data JSONB NOT NULL, PRIMARY KEY (table_name, key));
+         CREATE TABLE IF NOT EXISTS pgcouch_inbox (sequence BIGINT PRIMARY KEY, document JSONB NOT NULL);`)
       if (!closed && options.autoStart !== false) start()
       await reconcile()
    })

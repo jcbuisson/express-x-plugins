@@ -267,3 +267,78 @@ test('PGCouch: live replication, start/stop and model disposal', async t => {
    await assert.rejects(a.horses.create(13, { name: 'Disposed' }), /disposed/)
    assert.notEqual(a.api.createElectricModel('horses'), a.horses)
 })
+
+
+test('PGCouch: incremental changes capture cascades and trigger effects; checkpoints bootstrap across gaps', async t => {
+   const f = await fixture(t, { checkpointInterval: 3 })
+   await f.db.exec(`CREATE FUNCTION rename_horse() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN UPDATE horses SET name = upper(name) WHERE id = NEW.horse_id; RETURN NEW; END $$;
+      CREATE TRIGGER rename_horse AFTER INSERT ON examinations FOR EACH ROW EXECUTE FUNCTION rename_horse();`)
+   await f.server.submit([{ action: 'insert', table: 'horses', id: 1, data: { name: 'Luna' } }], {}, 'transaction:delta1')
+   await f.server.submit([{ action: 'insert', table: 'examinations', id: 2, data: { horse_id: 1 } }], {}, 'transaction:delta2')
+   await f.server.submit([{ action: 'update', table: 'horses', id: 1, data: { name: 'Moon' } }], {}, 'transaction:delta3')
+   await f.server.submit([{ action: 'delete', table: 'horses', id: 1 }], {}, 'transaction:delta4')
+   const docs = (await Promise.all([1, 2, 3, 4].map(i => f.couch.get(`result:delta${i}`)))).map(({ _rev, ...doc }) => doc)
+   assert.equal(docs[0].snapshot, undefined)
+   assert.equal(docs[1].snapshot, undefined)
+   assert.equal(docs[1].changes.find(row => row.table === 'horses').data.name, 'LUNA')
+   assert.equal(docs[2].snapshot.horses[0].name, 'Moon')
+   assert.deepEqual(docs[3].changes.map(row => [row.table, row.data]).sort(), [['examinations', null], ['horses', null]])
+   const a = await f.client()
+   // Replication can deliver later decisions before their predecessors.
+   await a.couch.put(docs[1]); await a.horses.flushQueue()
+   assert.deepEqual(await a.horses.findMany(), [])
+   await a.couch.put(docs[2]); await a.horses.flushQueue()
+   assert.equal((await a.horses.findUnique({ id: 1 })).name, 'Moon')
+   await a.couch.put(docs[3]); await a.horses.flushQueue()
+   assert.deepEqual(await a.horses.findMany(), [])
+   assert.deepEqual(await a.examinations.findMany(), [])
+   // Older arrivals must not restore deleted rows.
+   await a.couch.put(docs[0]); await a.horses.flushQueue()
+   assert.deepEqual(await a.horses.findMany(), [])
+   assert.equal((await a.db.query('SELECT count(*)::int AS n FROM pgcouch_inbox')).rows[0].n, 0)
+})
+
+test('PGCouch: decision ingestion is paged, durable across restart, and accepts legacy snapshots', async t => {
+   const f = await fixture(t), a = await f.client()
+   const { _rev, ...bootstrap } = await f.couch.get('result:bootstrap')
+   const docs = [bootstrap]
+   for (let i = 1; i <= 105; i++) docs.push({
+      _id: `result:page${i}`, type: 'result', status: 'accepted', sequence: String(i),
+      changes: [{ table: 'horses', id: 1, data: { id: 1, name: `Horse ${i}`, last_examination_id: null } }],
+   })
+   await a.couch.bulkDocs(docs)
+   const original = a.couch.changes.bind(a.couch)
+   const limits = []
+   a.couch.changes = options => { limits.push(options.limit); return original(options) }
+   await a.horses.flushQueue()
+   assert.ok(limits.length >= 2)
+   assert.ok(limits.every(limit => limit === 100))
+   assert.equal((await a.horses.findUnique({ id: 1 })).name, 'Horse 105')
+   await a.api.disposePGCouchSync()
+   const restarted = await f.client(a)
+   assert.equal((await restarted.horses.findUnique({ id: 1 })).name, 'Horse 105')
+   // Old servers sent a snapshot with every decision, without a changes field.
+   await a.couch.put({ _id: 'result:legacy', type: 'result', status: 'accepted', sequence: '106',
+      snapshot: { horses: [{ id: 2, name: 'Legacy', last_examination_id: null }], examinations: [] } })
+   await restarted.horses.flushQueue()
+   assert.equal((await restarted.horses.findUnique({ id: 2 })).name, 'Legacy')
+   assert.equal(await restarted.horses.findUnique({ id: 1 }), null)
+})
+
+test('PGCouch: row deltas use final state after recursive AFTER triggers', async t => {
+   const f = await fixture(t)
+   await f.db.exec(`CREATE FUNCTION normalize_horse() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+         IF NEW.name <> upper(NEW.name) THEN UPDATE horses SET name = upper(NEW.name) WHERE id = NEW.id; END IF;
+         RETURN NEW;
+      END $$;
+      CREATE TRIGGER a_normalize AFTER INSERT OR UPDATE ON horses FOR EACH ROW EXECUTE FUNCTION normalize_horse();`)
+   await f.server.submit([{ action: 'insert', table: 'horses', id: 1, data: { name: 'Luna' } }], {}, 'transaction:normalized')
+   const decision = await f.couch.get('result:normalized')
+   assert.equal(decision.changes.length, 1)
+   assert.equal(decision.changes[0].data.name, 'LUNA')
+   const a = await f.client()
+   await f.roundTrip(a)
+   assert.equal((await a.horses.findUnique({ id: 1 })).name, 'LUNA')
+})

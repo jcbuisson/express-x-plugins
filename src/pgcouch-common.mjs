@@ -28,6 +28,10 @@ export function json(value) {
    return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? String(item) : item)
 }
 
+export function mutationTarget(idOrWhere) {
+   return idOrWhere !== null && typeof idOrWhere === 'object' ? { where: idOrWhere } : { id: idOrWhere }
+}
+
 export function documentOf(value, models) {
    object(value)
    if (value._id === 'transaction:bootstrap' || !/^transaction:[A-Za-z0-9_-]{1,128}$/.test(value._id) || value.type !== 'transaction' || value.status !== 'pending') throw new TypeError('Invalid transaction document')
@@ -38,13 +42,24 @@ export function documentOf(value, models) {
       object(op)
       const model = models.find(m => m.table === op.table)
       if (!model || !['insert', 'update', 'delete'].includes(op.action)) throw new TypeError('Unknown table or action')
-      if (!['string', 'number'].includes(typeof op.id) || op.id === '' || (typeof op.id === 'number' && !Number.isSafeInteger(op.id))) throw new TypeError('An explicit string or safe integer id is required')
+      const filtered = Object.hasOwn(op, 'where')
+      if (filtered) {
+         if (op.action === 'insert' || Object.hasOwn(op, 'id')) throw new TypeError('Use either id or where for update/delete')
+         whereSQL(op.where)
+         object(op.where)
+         const validOperand = value => value === null || ['string', 'boolean', 'bigint'].includes(typeof value)
+            || (typeof value === 'number' && Number.isFinite(value)) || (value instanceof Date && Number.isFinite(value.getTime()))
+         for (const value of Object.values(op.where)) {
+            const operands = value && Object.getPrototypeOf(value) === Object.prototype ? Object.values(value) : [value]
+            if (!operands.every(validOperand)) throw new TypeError('Mutation filters require defined scalar values')
+         }
+      } else if (!['string', 'number'].includes(typeof op.id) || op.id === '' || (typeof op.id === 'number' && !Number.isSafeInteger(op.id))) throw new TypeError('An explicit string or safe integer id is required')
       const data = op.action === 'delete' ? undefined : object(op.data)
       if (data) for (const key of Object.keys(data)) {
          quote(key)
-         if (key === model.primaryKey && data[key] !== op.id) throw new TypeError('Primary key cannot change')
+         if (key === model.primaryKey && (filtered || data[key] !== op.id)) throw new TypeError('Primary key cannot change')
       }
-      return { action: op.action, table: op.table, id: op.id, ...(data ? { data } : {}) }
+      return { action: op.action, table: op.table, ...(filtered ? { where: op.where } : { id: op.id }), ...(data ? { data } : {}) }
    })
    return JSON.parse(json({ _id: value._id, type: 'transaction', status: 'pending', operations, ...(value.previous ? { previous: value.previous } : {}) }))
 }
@@ -69,26 +84,34 @@ export async function applyOperations(tx, operations, models, { deferConstraints
    await tx.query('SET CONSTRAINTS ALL DEFERRED')
    for (const op of operations) {
       const model = models.find(m => m.table === op.table)
-      const table = quote(model.table), pk = quote(model.primaryKey)
+      const table = quote(model.table)
+      const filtered = Object.hasOwn(op, 'where')
+      const where = filtered ? op.where : { [model.primaryKey]: op.id }
       let result
-      if (op.action === 'delete') result = await tx.query(`DELETE FROM ${table} WHERE ${pk} = $1 RETURNING *`, [op.id])
+      if (op.action === 'delete') {
+         const filter = whereSQL(where)
+         result = await tx.query(`DELETE FROM ${table} WHERE ${filter.sql} RETURNING *`, filter.values)
+      }
       else {
          const entries = Object.entries({ ...op.data, ...(op.action === 'insert' ? { [model.primaryKey]: op.id } : {}) })
             .filter(([key, value]) => value !== undefined && (op.action === 'insert' || key !== model.primaryKey))
          if (!entries.length) throw new TypeError('An update requires at least one field')
          const values = entries.map(([, value]) => value)
          if (op.action === 'insert') result = await tx.query(`INSERT INTO ${table} (${entries.map(([key]) => quote(key)).join(', ')}) VALUES (${values.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`, values)
-         else result = await tx.query(`UPDATE ${table} SET ${entries.map(([key], i) => `${quote(key)} = $${i + 1}`).join(', ')} WHERE ${pk} = $${values.length + 1} RETURNING *`, [...values, op.id])
+         else {
+            const filter = whereSQL(where, values.length)
+            result = await tx.query(`UPDATE ${table} SET ${entries.map(([key], i) => `${quote(key)} = $${i + 1}`).join(', ')} WHERE ${filter.sql} RETURNING *`, [...values, ...filter.values])
+         }
       }
-      if (!result.rows.length && op.action === 'update') throw Object.assign(new Error('Row does not exist'), { code: 'not-found' })
-      results.push(result.rows[0] ?? null)
+      if (!result.rows.length && op.action === 'update' && !filtered) throw Object.assign(new Error('Row does not exist'), { code: 'not-found' })
+      results.push(filtered ? result.rows : result.rows[0] ?? null)
    }
    // Surface deferred violations before recording a successful decision.
    if (!deferConstraints) await tx.query('SET CONSTRAINTS ALL IMMEDIATE')
    return results
 }
 
-export function whereSQL(where = {}) {
+export function whereSQL(where = {}, offset = 0) {
    object(where)
    const clauses = [], values = []
    const operators = { gt: '>', gte: '>=', lt: '<', lte: '<=' }
@@ -101,9 +124,9 @@ export function whereSQL(where = {}) {
          if (!entries.length) throw new TypeError('Empty range constraint')
          for (const [op, operand] of entries) {
             if (!operators[op]) throw new TypeError('Unsupported where operator')
-            values.push(operand); clauses.push(`${column} ${operators[op]} $${values.length}`)
+            values.push(operand); clauses.push(`${column} ${operators[op]} $${offset + values.length}`)
          }
-      } else { values.push(value); clauses.push(`${column} = $${values.length}`) }
+      } else { values.push(value); clauses.push(`${column} = $${offset + values.length}`) }
    }
    return { sql: clauses.join(' AND ') || 'TRUE', values }
 }

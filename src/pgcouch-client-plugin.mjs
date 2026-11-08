@@ -1,5 +1,5 @@
 import { Observable, Subject, startWith, switchMap, distinctUntilChanged, takeUntil } from 'rxjs'
-import { applyOperations, documentOf, json, modelsOf, putImmutable, quote, readRows, transaction, whereSQL } from './pgcouch-common.mjs'
+import { applyOperations, documentOf, json, modelsOf, mutationTarget, putImmutable, quote, readRows, transaction, whereSQL } from './pgcouch-common.mjs'
 
 /** Offline relational models; localDb is a PGLite instance with the application schema. */
 export function pgcouchClientPlugin(app, options = {}) {
@@ -204,14 +204,14 @@ export function pgcouchClientPlugin(app, options = {}) {
                      catch (error) { return run(() => { throw error }) }
                      return run(() => readRows(tx, model, filter, query))
                   }
-                  const remove = rowId => write({ action: 'delete', table: model.table, id: rowId })
+                  const remove = idOrWhere => write({ action: 'delete', table: model.table, ...mutationTarget(idOrWhere) })
                   scope[model.name] = {
                      create(idOrData, data) {
                         const value = data ?? idOrData
                         const rowId = data === undefined ? value?.[model.primaryKey] ?? globalThis.crypto.randomUUID() : idOrData
                         return write({ action: 'insert', table: model.table, id: rowId, data: value })
                      },
-                     update: (rowId, data) => write({ action: 'update', table: model.table, id: rowId, data }),
+                     update: (idOrWhere, data) => write({ action: 'update', table: model.table, ...mutationTarget(idOrWhere), data }),
                      delete: remove, remove, findMany,
                      async findUnique(where) { return (await findMany(where, { limit: 1 }))[0] ?? null },
                   }
@@ -279,8 +279,9 @@ export function pgcouchClientPlugin(app, options = {}) {
             const id = data === undefined ? value[model.primaryKey] ?? globalThis.crypto.randomUUID() : idOrData
             return (await transact([{ action: 'insert', table: model.table, id, data: value }])).results[0]
          },
-         async update(id, data) { assertActive(); return (await transact([{ action: 'update', table: model.table, id, data }])).results[0] },
-         async remove(id) { assertActive(); return (await transact([{ action: 'delete', table: model.table, id }])).results[0] },
+         async update(idOrWhere, data) { assertActive(); return (await transact([{ action: 'update', table: model.table, ...mutationTarget(idOrWhere), data }])).results[0] },
+         async remove(idOrWhere) { assertActive(); return (await transact([{ action: 'delete', table: model.table, ...mutationTarget(idOrWhere) }])).results[0] },
+         async delete(idOrWhere) { return api.remove(idOrWhere) },
 
          prepare: () => { assertActive(); return ready }, start: () => { assertActive(); return ready.then(start) }, stop, getStatus,
          async dispose() { if (disposed) return; disposed = true; ended.next(); ended.complete(); cache.delete(name); await queue },

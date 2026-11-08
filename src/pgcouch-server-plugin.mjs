@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { applyOperations, canonical, documentOf, json, modelsOf, putImmutable, quote, readRows, snapshot, transaction } from './pgcouch-common.mjs'
+import { applyOperations, canonical, documentOf, json, modelsOf, mutationTarget, putImmutable, quote, readRows, snapshot, transaction } from './pgcouch-common.mjs'
 
 export async function preparePGCouchSchema(db) {
    await db.query(`CREATE TABLE IF NOT EXISTS pgcouch_state (id INTEGER PRIMARY KEY CHECK (id = 1), sequence BIGINT NOT NULL)`)
@@ -66,7 +66,8 @@ export function pgcouchServerPlugin(app, db, models, options = {}) {
             for (const op of doc.operations) {
                const model = configured.find(m => m.table === op.table)
                const action = op.action === 'insert' ? 'create' : op.action
-               await authorize(context, model, action, op.action === 'delete' ? [op.id] : [op.id, op.data])
+               const target = Object.hasOwn(op, 'where') ? op.where : op.id
+               await authorize(context, model, action, op.action === 'delete' ? [target] : [target, op.data])
             }
             results = await applyOperations(tx, doc.operations, configured)
          } catch (error) {
@@ -179,8 +180,8 @@ export function pgcouchServerPlugin(app, db, models, options = {}) {
          const id = data === undefined ? idOrData[model.primaryKey] ?? randomUUID() : idOrData
          return (await submit([{ action: 'insert', table: model.table, id, data: data ?? idOrData }], this))[0]
       },
-      async update(id, data) { return (await submit([{ action: 'update', table: model.table, id, data }], this))[0] },
-      async delete(id) { return (await submit([{ action: 'delete', table: model.table, id }], this))[0] },
+      async update(idOrWhere, data) { return (await submit([{ action: 'update', table: model.table, ...mutationTarget(idOrWhere), data }], this))[0] },
+      async delete(idOrWhere) { return (await submit([{ action: 'delete', table: model.table, ...mutationTarget(idOrWhere) }], this))[0] },
    })
    app.createService(options.serviceName ?? 'pgcouch', {
       async transaction(operations, id) { return submit(operations, this, id) },

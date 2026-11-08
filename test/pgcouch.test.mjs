@@ -342,3 +342,84 @@ test('PGCouch: row deltas use final state after recursive AFTER triggers', async
    await f.roundTrip(a)
    assert.equal((await a.horses.findUnique({ id: 1 })).name, 'LUNA')
 })
+
+test('PGCouch: where updates and deletes replicate atomically and use server-time matches', async t => {
+   const f = await fixture(t), a = await f.client(), b = await f.client()
+   await a.api.pgcouchTransaction(async tx => {
+      for (const id of [1, 2, 3]) await tx.horses.create(id, { name: `Horse ${id}` })
+      await tx.examinations.create(100, { horse_id: 1 })
+      await tx.examinations.create(101, { horse_id: 2 })
+   })
+   await f.roundTrip(a); await f.roundTrip(b)
+   // This row is unknown locally when the filter is queued, but matches on the server.
+   await f.app.service('horses').create(4, { name: 'Horse 4' })
+   const updated = await a.horses.update({ id: { gte: 2, lt: 5 }, last_examination_id: null }, { last_examination_id: 100 })
+   assert.deepEqual(updated.map(row => row.id).sort(), [2, 3])
+   await f.roundTrip(a); await f.roundTrip(b)
+   assert.deepEqual((await b.horses.findMany({ last_examination_id: 100 })).map(row => row.id), [2, 3, 4])
+   const removed = await a.horses.delete({ last_examination_id: 100 })
+   assert.deepEqual(removed.map(row => row.id).sort(), [2, 3, 4])
+   await f.roundTrip(a); await f.roundTrip(b)
+   assert.deepEqual((await b.horses.findMany()).map(row => row.id), [1])
+   assert.deepEqual((await b.examinations.findMany()).map(row => row.id), [100])
+   assert.deepEqual(await a.horses.update({ id: 999 }, { name: 'Missing' }), [])
+   assert.deepEqual(await a.horses.remove({ id: 999 }), [])
+   await assert.rejects(a.horses.update(999, { name: 'Missing' }), /does not exist/)
+})
+
+test('PGCouch: callback and array transactions support where, preserve results, and roll back bulk failures', async t => {
+   const f = await fixture(t), a = await f.client()
+   await a.api.pgcouchTransaction(async tx => {
+      await tx.horses.create(1, { name: 'One' })
+      await tx.horses.create(2, { name: 'Two' })
+   })
+   const before = (await a.horses.getStatus()).pending
+   await assert.rejects(a.api.pgcouchTransaction(async tx => {
+      await tx.horses.update({}, { last_examination_id: null })
+      await tx.horses.update({}, { name: 'Duplicate' })
+   }))
+   assert.deepEqual((await a.horses.findMany()).map(row => row.name), ['One', 'Two'])
+   assert.equal((await a.horses.getStatus()).pending, before)
+   const { results } = await a.api.pgcouchTransaction(async tx => {
+      const rows = await tx.horses.update({ id: { gt: 0, lte: 2 } }, { last_examination_id: null })
+      assert.equal(rows.length, 2)
+      assert.equal((await tx.horses.findMany({ last_examination_id: null })).length, 2)
+      await tx.horses.delete({ name: 'Two' })
+   })
+   assert.equal(results[0].length, 2)
+   assert.equal(results[1][0].id, 2)
+   const arrayResult = await a.api.pgcouchTransaction([
+      { action: 'update', table: 'horses', where: { id: 1 }, data: { name: 'First' } },
+      { action: 'delete', table: 'horses', where: { name: 'Absent' } },
+   ])
+   assert.equal(arrayResult.results[0][0].name, 'First')
+   assert.deepEqual(arrayResult.results[1], [])
+   await f.roundTrip(a)
+   assert.equal((await f.app.service('horses').update({ name: 'First' }, { name: 'Last' }))[0].id, 1)
+   assert.deepEqual(await f.app.service('horses').update({ id: 999 }, { name: 'Absent' }), [])
+   assert.equal((await f.app.service('horses').delete({})).length, 1)
+   await f.roundTrip(a)
+   assert.deepEqual(await a.horses.findMany(), [])
+})
+
+test('PGCouch: mutation filters validate protocol and authorization receives the predicate', async t => {
+   const normalized = modelsOf(models)
+   const proposal = operations => ({ _id: 'transaction:filters', type: 'transaction', status: 'pending', operations })
+   for (const op of [
+      { action: 'insert', table: 'horses', where: {}, data: { name: 'Invalid' } },
+      { action: 'delete', table: 'horses', id: 1, where: {} },
+      ...[null, undefined, [], { id: undefined }, { id: NaN }, { id: () => 1 }, { id: { gt: undefined } }, { id: { sql: '1=1' } }, { 'id; DROP TABLE horses': 1 }].map(where => ({ action: 'delete', table: 'horses', where })),
+      { action: 'update', table: 'horses', where: {}, data: { id: 42 } },
+   ]) assert.throws(() => documentOf(proposal([op]), normalized))
+   const seen = []
+   const f = await fixture(t, { authorize(context, operation) {
+      seen.push(operation)
+      return typeof operation.args[0] !== 'object'
+   } })
+   await f.app.service('horses').create(1, { name: 'One' })
+   await assert.rejects(f.app.service('horses').update({ id: { gte: 1 } }, { name: 'Forbidden' }), /forbidden/i)
+   await assert.rejects(f.app.service('horses').delete({}), /forbidden/i)
+   assert.deepEqual(seen.at(-2).args, [{ id: { gte: 1 } }, { name: 'Forbidden' }])
+   assert.deepEqual(seen.at(-1).args, [{}])
+   assert.equal((await f.db.query('SELECT name FROM horses')).rows[0].name, 'One')
+})

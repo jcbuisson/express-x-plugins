@@ -45,7 +45,7 @@ The application creates its own business tables and migrations.
 
 The plugin registers each model's `findUnique(where)`,
 `findMany(where, { limit })`, `create(data)`, `create(id, data)`,
-`update(id, data)`, and `delete(id)` Express-X services. Server `create(data)`
+`update(idOrWhere, data)`, and `delete(idOrWhere)` Express-X services. Server `create(data)`
 uses a supplied primary key or generates a UUID; integer keys should be supplied
 explicitly. Inserts are strict: duplicate keys reject instead of upserting.
 
@@ -96,8 +96,8 @@ console.log(await horses.getStatus()) // { pending, failed, blocked, online }
 // await localDb.close(); await couch.close()
 ```
 
-Client methods: `create(data)`, `create(id, data)`, `update(id, data)`,
-`remove(id)`, `findMany(where, { limit })`, `findUnique(where)`,
+Client methods: `create(data)`, `create(id, data)`, `update(idOrWhere, data)`,
+`delete(idOrWhere)` (alias `remove`), `findMany(where, { limit })`, `findUnique(where)`,
 `getObservable(where, { initialValue, limit })`, `prepare()`, `start()`, `stop()`,
 `dispose()`, `flushQueue()`, `waitForIdle()`, `subscribe(callback)`, and `getStatus()`.
 Filters support equality, null, and `gt/gte/lt/lte` ranges. Observable queries emit
@@ -105,7 +105,50 @@ after complete local commits and reconciliation, never intermediate operations.
 `pgcouchTransaction(operations)` returns `{ id, results }` after the durable local
 commit. Completion means locally committed; `pending` drops once the server's
 decision arrives. Server rejections are reported through `onError` and `failed`.
-An update to a missing row rejects; deleting a missing row is a no-op.
+An update by scalar ID to a missing row rejects; deleting a missing ID is a no-op.
+
+Updates and deletes also accept a `where` object, using the same equality, null,
+and `gt/gte/lt/lte` filters as `findMany`:
+
+```js
+const updated = await horses.update({ id: { gte: 10, lt: 20 } }, {
+  last_examination_id: null,
+})
+const deleted = await horses.delete({ last_examination_id: null })
+// Explicitly match all rows:
+await horses.update({}, { last_examination_id: null })
+```
+
+Object filters always return an array of affected rows (including `[]` for no
+matches), with no guaranteed order. Scalar IDs preserve the existing single-row
+return value. A primary-key filter such as `{ id: 42 }` still returns an array.
+All matching rows are changed atomically. Primary keys cannot be updated by a
+filter. Missing arguments, invalid filters and undefined filter values reject;
+use an explicit `{}` to match every row.
+
+These forms work on client models, transaction-scoped callback models and server
+services. Array transactions can specify `where` instead of `id`:
+
+```js
+await app.pgcouchTransaction([
+  { action: 'update', table: 'horses', where: { id: { gte: 10 } },
+    data: { last_examination_id: null } },
+  { action: 'delete', table: 'examinations', where: { horse_id: 42 } },
+])
+```
+
+Each filtered statement counts as one operation, regardless of how many rows it
+matches. Its transaction result is an array of rows. The server authorization
+hook receives `args: [where, data]` for an update and `args: [where]` for a delete;
+scalar-ID calls keep their existing arguments. Authorization is checked for the
+whole statement, so policies must explicitly handle predicate arguments.
+
+Predicates are stored in the proposal and reevaluated during local rebases and
+when the server executes the transaction. Server matches may differ from the
+original optimistic matches, especially after an offline interval. The server's
+row changes determine the final state on every client. A callback's JavaScript
+branches are still evaluated only locally. Upgrade servers to support `where`
+operations before clients begin submitting them.
 
 The client also accepts a callback with transaction-bound models, keyed by the
 configured model name:

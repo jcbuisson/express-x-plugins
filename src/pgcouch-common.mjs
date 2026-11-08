@@ -64,7 +64,7 @@ export async function transaction(db, run) {
    } finally { tx.release() }
 }
 
-export async function applyOperations(tx, operations, models) {
+export async function applyOperations(tx, operations, models, { deferConstraints = false } = {}) {
    const results = []
    await tx.query('SET CONSTRAINTS ALL DEFERRED')
    for (const op of operations) {
@@ -84,7 +84,7 @@ export async function applyOperations(tx, operations, models) {
       results.push(result.rows[0] ?? null)
    }
    // Surface deferred violations before recording a successful decision.
-   await tx.query('SET CONSTRAINTS ALL IMMEDIATE')
+   if (!deferConstraints) await tx.query('SET CONSTRAINTS ALL IMMEDIATE')
    return results
 }
 

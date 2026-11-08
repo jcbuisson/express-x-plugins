@@ -69,6 +69,54 @@ test('PGCouch: offline atomic multi-table transaction, replication, cold bootstr
    assert.deepEqual(f.errors, [])
 })
 
+test('PGCouch: callback reads its writes, defers constraints and replicates one atomic proposal', async t => {
+   const f = await fixture(t), a = await f.client()
+   let saved
+   let notifications = 0
+   const unsubscribe = a.horses.subscribe(() => { notifications++ })
+   const result = await a.api.pgcouchTransaction(async tx => {
+      saved = tx.horses
+      await tx.horses.create({ id: 42, name: 'Luna', last_examination_id: 100 })
+      assert.equal((await tx.horses.findUnique({ id: 42 })).name, 'Luna')
+      await tx.examinations.create(100, { horse_id: 42 })
+      await tx.horses.update(42, { name: 'Moon' })
+      assert.equal((await tx.horses.findMany({ name: 'Moon' })).length, 1)
+      assert.equal(notifications, 0)
+   })
+   assert.equal(result.results.length, 3)
+   assert.equal(notifications, 1)
+   assert.equal((await a.horses.getStatus()).pending, 1)
+   await assert.rejects(saved.update(42, { name: 'Late' }), /finished/)
+   await f.roundTrip(a)
+   assert.equal((await f.db.query('SELECT name FROM horses WHERE id = 42')).rows[0].name, 'Moon')
+   await a.api.pgcouchTransaction(async tx => {
+      await tx.horses.update(42, { last_examination_id: null })
+      await tx.examinations.delete(100)
+      await tx.horses.remove(42)
+   })
+   await f.roundTrip(a)
+   assert.deepEqual((await f.db.query('SELECT * FROM horses')).rows, [])
+   unsubscribe()
+})
+
+test('PGCouch: callback errors, caught operation errors and deferred violations roll back the outbox', async t => {
+   const f = await fixture(t), a = await f.client()
+   for (const callback of [
+      async tx => { await tx.horses.create(1, { name: 'Luna' }); throw new Error('Abort') },
+      async tx => { await tx.horses.create(1, { name: 'Luna' }); await tx.examinations.create(1, { horse_id: 999 }) },
+      async tx => {
+         await tx.horses.create(1, { name: 'Luna' })
+         await assert.rejects(tx.horses.update(999, { name: 'Missing' }))
+      },
+      async tx => { await tx.horses.create(1, { name: 'Luna' }); await tx.horses.update(1, {}) },
+      async () => {},
+   ]) {
+      await assert.rejects(a.api.pgcouchTransaction(callback))
+      assert.deepEqual(await a.horses.findMany(), [])
+      assert.equal((await a.horses.getStatus()).pending, 0)
+   }
+})
+
 test('PGCouch: local constraint violation rolls back all operations and outbox', async t => {
    const f = await fixture(t), a = await f.client()
    await assert.rejects(a.api.pgcouchTransaction([

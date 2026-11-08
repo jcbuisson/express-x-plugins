@@ -116,15 +116,64 @@ export function pgcouchClientPlugin(app, options = {}) {
    void ready.catch(report)
 
    async function transact(operations) {
-      operations = structuredClone(operations)
+      const callback = typeof operations === 'function' ? operations : null
+      operations = callback ? [] : structuredClone(operations)
       await ready
       return enqueue(async () => {
          const id = `transaction:${globalThis.crypto.randomUUID()}`
          let doc, results
          await transaction(db, async tx => {
+            if (callback) {
+               let active = true, pending = Promise.resolve(), failed = false, failure
+               results = []
+               const run = work => {
+                  if (!active) return Promise.reject(new Error('Transaction callback has finished'))
+                  const result = pending.then(work)
+                  pending = result.catch(error => { if (!failed) failure = error; failed = true })
+                  return result
+               }
+               const scope = Object.create(null)
+               for (const model of models) {
+                  const write = op => {
+                     // Capture inputs before the caller can mutate them.
+                     let operation
+                     try {
+                        operation = documentOf({ _id: id, type: 'transaction', status: 'pending', operations: [op] }, models).operations[0]
+                     } catch (error) { return run(() => { throw error }) }
+                     return run(async () => {
+                        if (operations.length >= 1000) throw new TypeError('Expected 1–1000 operations')
+                        const [value] = await applyOperations(tx, [operation], models, { deferConstraints: true })
+                        operations.push(operation)
+                        results.push(value)
+                        return value
+                     })
+                  }
+                  const findMany = (where = {}, queryOptions = {}) => {
+                     let filter, query
+                     try { filter = structuredClone(where); query = structuredClone(queryOptions) }
+                     catch (error) { return run(() => { throw error }) }
+                     return run(() => readRows(tx, model, filter, query))
+                  }
+                  const remove = rowId => write({ action: 'delete', table: model.table, id: rowId })
+                  scope[model.name] = {
+                     create(idOrData, data) {
+                        const value = data ?? idOrData
+                        const rowId = data === undefined ? value?.[model.primaryKey] ?? globalThis.crypto.randomUUID() : idOrData
+                        return write({ action: 'insert', table: model.table, id: rowId, data: value })
+                     },
+                     update: (rowId, data) => write({ action: 'update', table: model.table, id: rowId, data }),
+                     delete: remove, remove, findMany,
+                     async findUnique(where) { return (await findMany(where, { limit: 1 }))[0] ?? null },
+                  }
+               }
+               try { await callback(scope) }
+               finally { active = false; await pending }
+               if (failed) throw failure
+               await tx.query('SET CONSTRAINTS ALL IMMEDIATE')
+            }
             const previous = (await tx.query('SELECT id FROM pgcouch_outbox ORDER BY ordinal DESC LIMIT 1')).rows[0]?.id
             doc = documentOf({ _id: id, type: 'transaction', status: 'pending', operations, ...(previous ? { previous } : {}) }, models)
-            results = await applyOperations(tx, doc.operations, models)
+            if (!callback) results = await applyOperations(tx, doc.operations, models)
             await tx.query('INSERT INTO pgcouch_outbox (id, document) VALUES ($1, $2::jsonb)', [id, json(doc)])
          })
          changed.next()

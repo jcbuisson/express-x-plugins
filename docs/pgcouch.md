@@ -1,7 +1,6 @@
 # PGCouch
 
-PGCouch implements the Electric plugin's model CRUD/query API using PostgreSQL,
-PGLite and CouchDB/PouchDB. It imports no Electric client or sync extensions.
+PGCouch implements a model CRUD/query API using PostgreSQL/PGLite and CouchDB/PouchDB.
 `@electric-sql/pglite` is the PostgreSQL engine used locally, independently of Electric.
 
 ## Server
@@ -107,6 +106,33 @@ after complete local commits and reconciliation, never intermediate operations.
 commit. Completion means locally committed; `pending` drops once the server's
 decision arrives. Server rejections are reported through `onError` and `failed`.
 An update to a missing row rejects; deleting a missing row is a no-op.
+
+The client also accepts a callback with transaction-bound models, keyed by the
+configured model name:
+
+```js
+const { id, results } = await app.pgcouchTransaction(async tx => {
+  await tx.horses.create(42, { name: 'Luna' })
+  const horse = await tx.horses.findUnique({ id: 42 })
+  if (horse) await tx.examinations.create(100, { horse_id: horse.id })
+  await tx.horses.update(42, { last_examination_id: 100 })
+})
+```
+
+Each scoped model exposes `create`, `update`, `delete` (alias `remove`),
+`findMany`, and `findUnique`. Use these scoped methods inside the callback;
+ordinary models use the outer queue and awaiting them there would deadlock.
+Reads see earlier writes. Await the scoped calls; they execute in invocation
+order. Scoped models expire when the callback finishes. Throwing, any failed
+scoped operation (even if caught), or a constraint violation rolls back all
+writes and the outbox entry. Deferred constraints are checked after the callback.
+The callback must perform 1–1000 writes and returns the same `{ id, results }`
+envelope as the array form; its own return value is ignored.
+
+Only the resulting writes are replicated as one proposal. The callback and its
+reads run locally once; conditions are not reevaluated on the server. Server
+constraints and authorization still determine acceptance of the entire proposal.
+The server transaction service continues to accept operations arrays.
 
 `create(data)` generates a UUID unless the data includes its primary key.
 Offline mutations require client-generated IDs. `idGeneration: 'server'` is

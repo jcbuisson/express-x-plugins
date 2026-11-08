@@ -7,8 +7,11 @@ export function pgcouchClientPlugin(app, options = {}) {
    const couch = options.couch
    const db = options.localDb
    if (!couch?.put || !couch?.allDocs || !db?.transaction) throw new TypeError('options.couch (local PouchDB), localDb (PGLite), and models are required')
-      
+   
+   // Signals that local data may have changed
+   // Fires after the transaction commits, so observers see the complete transaction’s result, never its intermediate operations
    const changed = new Subject()
+
    const cache = new Map()
    let queue = Promise.resolve(), closed = false, feed, replication, timer, started = false
 

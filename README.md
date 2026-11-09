@@ -9,7 +9,7 @@ server and browser entry points.
 | [Electric](#electric-plugin-local-first-postgres) | PostgreSQL Shapes, with optional persistent offline writes | `/electric-server`, `/electric-client` |
 | [Reload](#reload-plugin) | Restore socket rooms and data after a page reload | `/reload-server`, `/reload-client` |
 | [Metadata sync](#custom-metadata-sync-plugin) | Timestamp reconciliation using Drizzle and Dexie | `/sync-server`, `/sync-client` |
-| [PGCouch](#pgcouch-plugin) | Atomic offline transactions replicated through CouchDB/PouchDB | `/pgcouch-server`, `/pgcouch-client` |
+| [PGCouch](#pgcouch-plugin) | Atomic offline transactions replicated through CouchDB/PouchDB | `/pgcouch-server`, `/pgcouch-client`, `/pgcouch-worker` |
 
 All import paths below are prefixed with `@jcbuisson/express-x-plugins`.
 `/electric-worker` and `/sync-algorithm` are supporting modules, not plugins.
@@ -733,6 +733,13 @@ const subscription = todos.getObservable({}).subscribe(console.log)
 ```
 
 Use matching server/client schemas and globally unique IDs for offline writes.
-The application owns both local databases and coordinates multi-tab access.
+The direct client API lets the application own both local databases and
+coordinate multi-tab access. Version **5.4.2** also provides
+`startPGCouchWorker` from `/pgcouch-worker` and storage helpers from
+`/pgcouch-storage`: a small application worker entry supplies the SQL schema,
+models, remote URL and storage prefix, while the plugin owns the shared database,
+replication and request/subscription runtime. The worker includes WebKit startup
+handling and preserves cached rows and pending edits during transport upgrades.
+See the [shared browser worker guide](docs/pgcouch.md#shared-browser-worker).
 PGCouch replicates row changes with periodic full checkpoints; use bounded
 scopes and read the guide's schema and permission requirements before deployment.

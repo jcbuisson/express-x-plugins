@@ -334,3 +334,72 @@ database and test user. Its connection must have permission to manage those
 resources. Protocol references: [PouchDB replication](https://pouchdb.apache.org/guides/replication.html),
 [PouchDB conflicts](https://pouchdb.apache.org/guides/conflicts.html), and
 [CouchDB validation](https://docs.couchdb.org/en/stable/ddocs/ddocs.html#validate-document-update-functions).
+
+
+## Shared browser worker
+
+`@jcbuisson/express-x-plugins/pgcouch-worker` exports `startPGCouchWorker`.
+The plugin owns PGlite initialization, PouchDB's `indexeddb` adapter, replication,
+transport-cursor upgrades, shared ownership, and the model request/subscription
+protocol. Application schema, models, remote URL and presentation remain in the
+application.
+
+Keep a small bundler entry such as `sync.worker.js`:
+
+```js
+import { startPGCouchWorker } from '@jcbuisson/express-x-plugins/pgcouch-worker'
+import schema from './local-schema.sql?raw' // Vite; otherwise pass SQL text
+
+startPGCouchWorker({
+  schema,
+  models: ['user', 'group', 'user_group_relation'],
+  remote: '/couchdb/my-database',
+  storagePrefix: 'my-app',
+})
+```
+
+Call this synchronously, before any top-level await. It registers the connection
+handler immediately, then initializes asynchronously, preserving WebKit's first
+connection. The returned `{ ready }` controller resolves after local setup.
+Worker errors are reported to connected ports.
+
+For Vite, import the entry as `./sync.worker.js?sharedworker&url` and construct a
+module SharedWorker. Use `storageForRemote` from the `/pgcouch-storage` export on
+both sides to derive the worker name from the remote URL and the same prefix:
+
+```js
+import workerUrl from './sync.worker.js?sharedworker&url'
+import { storageForRemote } from '@jcbuisson/express-x-plugins/pgcouch-storage'
+
+const storage = await storageForRemote('/couchdb/my-database', location.origin, 'my-app')
+const worker = new SharedWorker(workerUrl, { type: 'module', name: storage.worker })
+worker.port.start()
+```
+
+Install the optional browser peers: `@electric-sql/pglite`, `rxjs`,
+`pouchdb-browser`, and `pouchdb-adapter-indexeddb`. Server-only users do not need
+the browser peers.
+
+Ports emit `{ type: 'sync-state', ready, syncing, stage }`. Queue application
+messages until `ready` is true. Requests carry a unique `id` and use:
+
+- `call`: `{ model, method, args }` for CRUD, `prepare`, `getStatus`,
+  `flushQueue`, and `waitForIdle`;
+- `subscribe`: `{ model, args: [where, queryOptions] }`, followed by `value`
+  messages; cancel using `unsubscribe` with the same `id`;
+- `transaction`: `{ args: [operations] }` for an operation-array transaction;
+- `network`: `{ args: [enabled] }` to pause/resume replication for all tabs;
+- `dispose`: release this port's subscriptions without disposing other tabs.
+
+Responses are `{ type: 'result', id, value }` or include an `error` object.
+Subscription errors use `subscription-error`; replication errors use
+`sync-error`. `getStatus` also returns `initialized`, indicating whether a server
+snapshot has been applied. UI loading/error labels and startup timeouts belong to
+the application's port adapter. All connected tabs share the offline switch.
+
+`storageForRemote(remote, origin, prefix = 'express-x')` returns `remote`,
+`relational`, `transactions`, `lock`, and `worker`. Identity includes host and
+path, excluding credentials, query and fragment. Preserve the application's
+existing prefix when upgrading: `offline` retains the demo's previous names.
+Old adapter stores are retained; relational rows and pending mutations are not
+cleared. A transport change resets only its local change cursor.

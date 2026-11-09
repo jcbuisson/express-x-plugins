@@ -1,6 +1,6 @@
 {
   "name": "@jcbuisson/express-x-plugins",
-  "version": "5.4.0",
+  "version": "5.4.2",
   "description": "Plugins for express-x",
   "type": "module",
   "main": "./src/electric-server-plugin.mjs",
@@ -14,7 +14,9 @@
     "./sync-server": "./src/sync-server-plugin.mjs",
     "./sync-algorithm": "./src/sync-algorithm.mjs",
     "./pgcouch-client": "./src/pgcouch-client-plugin.mjs",
-    "./pgcouch-server": "./src/pgcouch-server-plugin.mjs"
+    "./pgcouch-server": "./src/pgcouch-server-plugin.mjs",
+    "./pgcouch-worker": "./src/pgcouch-worker.mjs",
+    "./pgcouch-storage": "./src/pgcouch-storage.mjs"
   },
   "private": false,
   "publishConfig": {
@@ -48,7 +50,9 @@
     "rxjs": "^7.8.2",
     "uuid": "^14.0.1",
     "vue": "^3.5.0",
-    "pouchdb": "^9.0.0"
+    "pouchdb": "^9.0.0",
+    "pouchdb-browser": "^9.0.0",
+    "pouchdb-adapter-indexeddb": "^9.0.0"
   },
   "peerDependenciesMeta": {
     "@electric-sql/client": {
@@ -77,6 +81,12 @@
     },
     "pouchdb": {
       "optional": true
+    },
+    "pouchdb-browser": {
+      "optional": true
+    },
+    "pouchdb-adapter-indexeddb": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -96,6 +106,8 @@
     "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.3",
     "uuid": "^14.0.1",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "pouchdb-browser": "^9.0.0",
+    "pouchdb-adapter-indexeddb": "^9.0.0"
   }
 }

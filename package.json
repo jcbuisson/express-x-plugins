@@ -1,6 +1,6 @@
 {
   "name": "@jcbuisson/express-x-plugins",
-  "version": "5.4.2",
+  "version": "5.4.3",
   "description": "Plugins for express-x",
   "type": "module",
   "main": "./src/electric-server-plugin.mjs",
@@ -23,7 +23,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0",
+    "node": ">=20.0.0",
     "npm": ">=8.0.0"
   },
   "repository": {
@@ -47,12 +47,12 @@
     "@vueuse/core": "^14.3.0",
     "dexie": "^4.4.4",
     "drizzle-orm": "^0.45.2",
+    "pouchdb": "^9.0.0",
+    "pouchdb-adapter-indexeddb": "^9.0.0",
+    "pouchdb-browser": "^9.0.0",
     "rxjs": "^7.8.2",
     "uuid": "^14.0.1",
-    "vue": "^3.5.0",
-    "pouchdb": "^9.0.0",
-    "pouchdb-browser": "^9.0.0",
-    "pouchdb-adapter-indexeddb": "^9.0.0"
+    "vue": "^3.5.0"
   },
   "peerDependenciesMeta": {
     "@electric-sql/client": {
@@ -101,13 +101,16 @@
     "fake-indexeddb": "^6.2.4",
     "pg": "^8.19.0",
     "pouchdb": "^9.0.0",
+    "pouchdb-adapter-indexeddb": "^9.0.0",
     "pouchdb-adapter-memory": "^9.0.0",
+    "pouchdb-browser": "^9.0.0",
     "rxjs": "^7.8.2",
     "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.3",
     "uuid": "^14.0.1",
-    "vue": "^3.5.0",
-    "pouchdb-browser": "^9.0.0",
-    "pouchdb-adapter-indexeddb": "^9.0.0"
+    "vue": "^3.5.0"
+  },
+  "dependencies": {
+    "pg-couch": "^0.1.0"
   }
 }

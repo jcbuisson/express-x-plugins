@@ -43,6 +43,9 @@ test('changing transport preserves cached rows and pending edits while resetting
 
 
 test('storage prefixes distinguish apps while preserving existing offline names', async () => {
+   const legacy = await storageForRemote('/couchdb/demo', 'https://example.com')
+   assert.ok(legacy.relational.startsWith('idb://express-x-pgcouch-relational-'))
+   assert.deepEqual(legacy, await storageForRemote('/couchdb/demo', 'https://example.com', 'express-x'))
    const first = await storageForRemote('/couchdb/demo', 'https://example.com', 'offline')
    const second = await storageForRemote('/couchdb/demo', 'https://example.com', 'other-app')
    assert.ok(first.relational.startsWith('idb://offline-pgcouch-relational-'))

@@ -1,6 +1,9 @@
 # PGCouch
 
-PGCouch implements a model CRUD/query API using PostgreSQL/PGLite and CouchDB/PouchDB.
+PGCouch wraps the `pg-couch` npm package with express-x model aliases and services.
+The package owns transactions, replication, reconciliation, workers and storage.
+Existing plugin entry points and the `express-x` storage prefix are preserved.
+PGCouch requires Node.js 20 or newer (as required by `pg-couch`).
 `@electric-sql/pglite` is the PostgreSQL engine used locally, independently of Electric.
 
 ## Server

@@ -16,7 +16,7 @@ All import paths below are prefixed with `@jcbuisson/express-x-plugins`.
 
 ## Setup
 
-Requires Node.js 18+ and npm 8+. Install the package in each application that
+Requires Node.js 20+ and npm 8+. Install the package in each application that
 uses it, along with Express-X and the dependencies for your chosen plugin.
 Optional peer dependencies are listed in each plugin's setup instructions.
 
@@ -651,7 +651,7 @@ plugin export aliases were adapted; the synchronization logic is preserved.
 
 ## PGCouch plugin
 
-[PGCouch](docs/pgcouch.md) provides model CRUD/query API with
+[PGCouch](docs/pgcouch.md) wraps `pg-couch` and provides model CRUD/query API with
 PostgreSQL on the server, PGLite on clients, and CouchDB/PouchDB transaction
 replication. It supports atomic multi-table offline writes, durable outboxes,
 and server-side constraint validation.

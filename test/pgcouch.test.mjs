@@ -5,7 +5,6 @@ import PouchDB from 'pouchdb'
 import memory from 'pouchdb-adapter-memory'
 import { pgcouchServerPlugin, pgcouchValidationDocument } from '../src/pgcouch-server-plugin.mjs'
 import { pgcouchClientPlugin } from '../src/pgcouch-client-plugin.mjs'
-import { documentOf, modelsOf } from '../src/pgcouch-common.mjs'
 PouchDB.plugin(memory)
 const models = [{ name: 'horses', primaryKey: 'id' }, { name: 'examinations', primaryKey: 'id' }]
 const schema = `CREATE TABLE horses (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, last_examination_id INTEGER);
@@ -189,10 +188,10 @@ test('PGCouch: query observables emit committed local changes', async t => {
    assert.equal(emissions.at(-1)[0].name, 'Reactive')
 })
 
-test('PGCouch: protocol validation and Couch role validation', () => {
-   const normalized = modelsOf(models)
-   assert.throws(() => documentOf({ _id: 'transaction:x', type: 'transaction', status: 'pending', operations: [{ action: 'insert', table: 'horses; DROP TABLE horses', id: 1, data: {} }] }, normalized))
-   assert.throws(() => documentOf({ _id: 'transaction:bootstrap', type: 'transaction', status: 'pending', operations: [{ action: 'insert', table: 'horses', id: 1, data: { name: 'Reserved' } }] }, normalized))
+test('PGCouch: protocol validation and Couch role validation', async t => {
+   const f = await fixture(t)
+   await assert.rejects(f.server.submit([{ action: 'insert', table: 'horses; DROP TABLE horses', id: 1, data: {} }]))
+   await assert.rejects(f.server.submit([{ action: 'insert', table: 'horses', id: 1, data: { name: 'Reserved' } }], {}, 'transaction:bootstrap'))
    const validate = Function(`return (${pgcouchValidationDocument().validate_doc_update})`)()
    assert.throws(() => validate({ _id: 'result:fake', type: 'result' }, null, { roles: [] }))
    assert.doesNotThrow(() => validate({ _id: 'result:trusted', type: 'result' }, null, { roles: ['pgcouch-server'] }))
@@ -403,14 +402,13 @@ test('PGCouch: callback and array transactions support where, preserve results, 
 })
 
 test('PGCouch: mutation filters validate protocol and authorization receives the predicate', async t => {
-   const normalized = modelsOf(models)
-   const proposal = operations => ({ _id: 'transaction:filters', type: 'transaction', status: 'pending', operations })
+   const validation = await fixture(t)
    for (const op of [
       { action: 'insert', table: 'horses', where: {}, data: { name: 'Invalid' } },
       { action: 'delete', table: 'horses', id: 1, where: {} },
       ...[null, undefined, [], { id: undefined }, { id: NaN }, { id: () => 1 }, { id: { gt: undefined } }, { id: { sql: '1=1' } }, { 'id; DROP TABLE horses': 1 }].map(where => ({ action: 'delete', table: 'horses', where })),
       { action: 'update', table: 'horses', where: {}, data: { id: 42 } },
-   ]) assert.throws(() => documentOf(proposal([op]), normalized))
+   ]) await assert.rejects(validation.server.submit([op]))
    const seen = []
    const f = await fixture(t, { authorize(context, operation) {
       seen.push(operation)
@@ -422,4 +420,33 @@ test('PGCouch: mutation filters validate protocol and authorization receives the
    assert.deepEqual(seen.at(-2).args, [{ id: { gte: 1 } }, { name: 'Forbidden' }])
    assert.deepEqual(seen.at(-1).args, [{}])
    assert.equal((await f.db.query('SELECT name FROM horses')).rows[0].name, 'One')
+})
+
+
+test('PGCouch: wrapper preserves aliases, service names and authorization contexts', async t => {
+   const seen = []
+   const f = await fixture(t, {
+      serviceName: 'transactions',
+      authorize(context, operation) { seen.push({ context, operation }); return true },
+   })
+   const context = { user: { id: 'authenticated-user' } }
+   await f.app.service('horses').create.call(context, 1, { name: 'Context' })
+   await f.app.service('horses').findMany.call(context)
+   await f.app.service('horses').findUnique.call(context, { id: 1 })
+   await f.app.service('transactions').transaction.call(context, [
+      { action: 'update', table: 'horses', id: 1, data: { name: 'Updated' } },
+   ], 'transaction:context')
+   assert.ok(seen.every(item => item.context === context))
+   assert.deepEqual(seen.map(item => item.operation.action), ['create', 'findMany', 'findUnique', 'update'])
+   await f.couch.put({ _id: 'transaction:replicated-context', type: 'transaction', status: 'pending', operations: [
+      { action: 'update', table: 'horses', id: 1, data: { name: 'Replicated' } },
+   ] })
+   await f.server.flushQueue()
+   assert.equal(seen.at(-1).context.app, f.app)
+   assert.equal(seen.at(-1).context.transport, 'couch')
+   const a = await f.client()
+   assert.equal(a.api.createPGCouchModel, a.api.createElectricModel)
+   assert.equal(a.api.disposePGCouchSync, a.api.disposeElectricSync)
+   assert.equal(a.api.createElectricModel('horses'), a.horses)
+   assert.throws(() => pgcouchServerPlugin(application(), f.db, models, { couch: f.couch, serviceName: 'horses' }), /conflicts/)
 })
